@@ -20,5 +20,225 @@ Prediction process;
 3. Create one token per energy deposit, and attend all energy deposits to all detectors for N rounds. Deposits get updated, detectors stay the same.
 4. Highest attention weights predict which deposit reaches which detector, latent space of deposit predicts PDG and energy.
 
+## How it's built
 
+The training data are subshowers from
+[subshowers](https://github.com/HenryDayHall/subshowers), as its
+`SubshowerSampler` sees them through the config's detector array. A
+**deposit** is one leaf particle hitting one detector: the detector, the
+leaf's PDG and its kinetic energy. Summed per detector, a subshower's
+deposits give the sampler's `energy_per_detector` (checked as the examples
+are made), and the **multiplicity** is the number of deposits — the number of
+detected particles, unless detectors overlap.
 
+| Step | In `simpleshower/model.py` |
+| --- | --- |
+| 1. Detector tokens | `DetectorTokens`: an MLP of each detector's position, plus an embedding learned for each detector. Positions are in a frame where the array spans −1 to 1, with Fourier features of x and y. Worked out once per call; attention never changes them. |
+| 2. Multiplicity | `MultiplicityEncoder` makes one token from the incident particle, `multiplicity_token: rounds` rounds of `DetectorAttention` attend it to every detector, and `MultiplicityPredictor` classifies the multiplicity: a class for each of 0–15, then classes widening by 25% up to `max_multiplicity`. Multiplicity 0 stops there. |
+| 3. Deposit tokens | `DepositEncoder` makes one token per deposit from the incident particle, the multiplicity and the deposit's rank (deposits are ordered by energy), and `deposit_token: rounds` (N) rounds of `DetectorAttention` update them. The rounds are cross-attention only: deposits attend to detectors, detectors stay the same. |
+| 4. Heads | `DetectorPointer` gives each deposit's final attention logits over the detectors; their softmax is the probability of each detector, and the greedy prediction is the highest attention weight. `DepositPDGPredictor` classifies the PDG (over `model: pdgs`), and `DepositEnergyPredictor` gives a normal distribution for log10(E / GeV), given the PDG. |
+
+The incident particle goes in as the inputs each encoder lists in the config:
+PDG as a learned embedding, positions in the array's frame, momentum as its
+direction and log10 |p| (so energy follows from momentum and PDG, as above),
+and `incident_ground_x/y`, where its straight track reaches the array. That's
+worked out from x/y/z and px/py/pz, so it's no new information, but it's
+roughly where the subshower lands.
+
+The loss is the sum of four negative log-likelihoods (weighted by
+`training: loss_weights`): multiplicity class, detector, PDG and log energy.
+The deposit losses use the true multiplicity, and generation the one drawn.
+
+## Requirements
+
+- Python 3, `torch`, `numpy`, `pyyaml`, and `matplotlib` for the comparison script
+- [subshowers](https://github.com/HenryDayHall/subshowers), importable, with
+  its own requirements. `scripts/make_fake_data.py` and the tests use its
+  `test/fake_data.py`, so use a clone of the repository rather than a copy of
+  the package.
+
+```bash
+git clone https://github.com/HenryDayHall/subshowers
+pip install -e subshowers      # or put it on PYTHONPATH
+pip install -e simpleshower    # or run from this folder
+```
+
+## Try it on fake showers
+
+From this folder:
+
+```bash
+python scripts/make_fake_data.py configs/example.yaml
+python -m simpleshower.train configs/example.yaml
+```
+
+`make_fake_data.py` grows the 12 showers `configs/example.yaml` lists with
+subshowers' `test/fake_data.py`, and splits them with energy cuts of 100 and
+500 GeV, into `example_data/` (about 20 s). Training samples them with a
+detector array of 400 random triangles (about a minute, then cached), and
+trains for 30 epochs (about 2.5 minutes on two CPU cores). Of the 5106
+subshowers, 3018 have deposits; 10% are held out.
+
+At the best epoch, the held-out losses are
+
+| | loss | accuracy |
+| --- | --- | --- |
+| multiplicity | 1.54 | 71% right about whether there are any deposits |
+| detector | 1.96 | 37% of deposits in the highest-attention detector |
+| PDG | 1.61 | 21% |
+| log energy | −0.08 | |
+
+For comparison, the detector nearest to where the start particle's track
+lands is right for 28% of deposits, and a Gaussian about that point (with
+its width fitted) has a detector loss of 2.12. The fake cascades pick each
+particle's PDG at random from five, so the PDG loss can't go below
+ln 5 = 1.61 here.
+
+## Training on real subshowers
+
+`configs/default.yaml` has the same `storage_path`, `showers` and
+`subshowers` sections as subshowers' configs, for the subshower sets to train
+on (make them with subshowers' `scripts/generate_data_from_config.py`), and a
+`detectors` section for the array — the Pierre Auger surface detector here.
+A random array needs a `seed`, so it's the same array every time.
+
+```bash
+python -m simpleshower.train configs/default.yaml [--epochs N] [--device cuda]
+                                                  [--max-subshowers-per-set N] [--output-dir DIR]
+```
+
+Sets the config asks for that aren't made are listed and left out. Outputs
+go to `training: output_dir`, by default
+`<storage_path>/<showers folder>/simpleshower/<run_name>/`:
+
+| File | What it is |
+| --- | --- |
+| `examples/` | Each subshower set's training examples, cached; made again if the set, the array or the sampling options change |
+| `config.yaml` | The config as trained, with `model: pdgs` filled in from the data |
+| `checkpoint_best.pt` | The model after the epoch with the lowest held-out loss |
+| `checkpoint_last.pt` | The model after the last epoch |
+| `validation_examples.npz` | The held-out subshowers |
+| `log.csv` | Losses and accuracies after each epoch |
+
+A checkpoint holds the weights, the config and the detector positions, so a
+model can be used without the array or the data.
+
+Each step takes `deposit_batch_size` subshowers that have deposits, for the
+deposit losses, and enough subshowers of all kinds for the multiplicity loss
+to see each once an epoch (no more than `batch_size`). An epoch is one pass
+over the subshowers with deposits. With an array as sparse as Pierre Auger's,
+most subshowers deposit nothing; they still teach the multiplicity. A
+subshower with more than `max_deposits_per_subshower` deposits trains on a
+random selection of them each step, weighted to count as much as all of them.
+
+## Predicting single subshowers
+
+```bash
+python -m simpleshower.generate CHECKPOINT --pdg 11 --position 600 1200 2600 --momentum 1.3 -4.4 -96
+```
+
+prints the deposits a subshower started by that particle leaves: positions
+in m and momenta in GeV/c, as in the histories. `--samples N` draws N
+subshowers from it, `--greedy` gives the most likely one (most likely
+multiplicity, highest attention weight, most likely PDG, median energy),
+`--seed` fixes the draws, and `--output FILE` writes them to json too. With
+`--examples`, the particle comes from a held-out subshower, which is shown
+next to the predictions:
+
+```bash
+python -m simpleshower.generate CHECKPOINT --examples OUTPUT_DIR/validation_examples.npz --index 22 --samples 2 --seed 0
+```
+
+```
+Incident particle: PDG 11 at (592.6, 1229.9, 2641.2) m, momentum (1.328, -4.443, -96.02) GeV/c, kinetic energy 96.13 GeV
+
+In the dataset (e2e4_1, start particle 4514):
+  9 deposits in 2 detectors, 8.874 GeV in all
+  detector      x [m]      y [m]    z [m]    PDG  energy [GeV]
+       182      581.1     1000.4      0.0     13         1.604
+       ...
+       240      495.1     1201.6      0.0     11       0.08784
+
+Predicted subshower 1:
+  2 deposits in 1 detectors, 1.524 GeV in all
+  detector      x [m]      y [m]    z [m]    PDG  energy [GeV]
+       182      581.1     1000.4      0.0     22         1.404
+       182      581.1     1000.4      0.0    -11        0.1198
+...
+```
+
+From Python:
+
+```python
+from simpleshower.generate import Generator
+
+generator = Generator.load("checkpoint_best.pt")
+subshower = generator.subshower(pdg=11, position=(600.0, 1200.0, 2600.0), momentum=(1.3, -4.4, -96.0), seed=0)
+subshower.deposit_detector, subshower.deposit_pdg, subshower.deposit_energy  # one entry per deposit
+subshower.energy_per_detector  # (N detectors,), as subshowers' sampler gives it
+
+# one subshower for each of many particles, batched
+subshowers = generator.predict(pdgs, positions, momenta, seed=0)  # (B,), (B, 3), (B, 3)
+```
+
+The subshowers have the attributes subshowers' `Responses.from_samples`
+reads, so they can be measured with its observables, like the dataset.
+
+## Comparing with the dataset
+
+```bash
+python scripts/compare_with_dataset.py CHECKPOINT
+```
+
+predicts a subshower from each held-out subshower's start particle, prints
+how the two populations compare, and plots subshowers'
+`observables.distributions` of both (`distributions.png`) and a few held-out
+subshowers next to the model's draws for them (`examples.png`), by the
+checkpoint. For the fake showers:
+
+| | dataset | model |
+| --- | --- | --- |
+| fraction with deposits | 0.56 | 0.54 |
+| deposits per subshower | 1.92 | 1.88 |
+| detectors hit per subshower | 1.09 | 1.25 |
+| energy deposited per subshower | 1.78 GeV | 1.78 GeV |
+| median energy deposited, of those with deposits | 2.04 GeV | 2.06 GeV |
+
+44% of the model's deposits are in a detector the dataset's subshower hit.
+
+## Limitations
+
+- Deposit tokens attend to the detectors but not to each other, as step 3
+  describes, so a subshower's deposits are drawn independently, given the
+  incident particle, the multiplicity and their ranks. The model can't say
+  "all in this detector, or all in that one", which is why it spreads deposits
+  over more detectors than the dataset (1.25 against 1.09 above). Self-attention
+  between the deposit tokens in each round would be the natural next step.
+- Without `deposit_rank` in `deposit_encoder: inputs`, every deposit token of
+  a subshower is the same, and its deposits are drawn from one distribution.
+- Held-out subshowers are chosen at random, so subshowers of the same
+  shower are in both sets.
+
+## Layout
+
+```
+simpleshower/
+├── model.py      The model, its losses, generation and checkpoints
+├── data.py       Training examples from subshowers' sampler, and their cache
+├── train.py      Training from a config
+└── generate.py   Predicting single subshowers
+scripts/
+├── make_fake_data.py        Fake showers and subshower sets, from a config
+└── compare_with_dataset.py  Held-out subshowers against the model's
+configs/
+├── default.yaml  Real showers and the Pierre Auger array
+└── example.yaml  Fake showers and a small random array
+test/
+└── test_end_to_end.py  Fake data, training, reloading and generating, in about 10 s
+```
+
+## Tests
+
+```bash
+pytest test
+```

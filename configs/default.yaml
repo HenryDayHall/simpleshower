@@ -1,9 +1,34 @@
+run_name: default
+
+# The subshowers to train on, as in subshowers' configs/default.yaml;
+# subshowers.datasets finds which of these sets are made.
+storage_path: /data/dust/user/dayhallh/eas/data/
+showers:
+  folder: PDG22
+  subfolders: [e1e5_0,
+               e1e6_0,
+               e1e7_0,
+               ]
+subshowers:
+  energy_cuts: [100, 500, 900]
+  leaves_only: true
+
 detectors:
   generator:
     name: generate_pierre_auger
     for_array: stop
 
 model:
+  # PDG codes the model knows, for incident particles and deposits. Left
+  # empty, train.py fills them in from the data.
+  pdgs: []
+  pdg_embedding_dim: 16
+  # Horizontal positions (of detectors, of incident particles, and of
+  # where their tracks reach the array) are also given as Fourier features,
+  # at frequencies pi 2^k for k below this, in a frame where the array
+  # spans -1 to 1.
+  position_frequencies: 8
+  dropout: 0.1  # in every MLP and attention round
   multiplicity_encoder:
     inputs:
       - incident_PDG
@@ -13,16 +38,31 @@ model:
       - incident_px
       - incident_py
       - incident_pz
+      # where the incident particle's track reaches the array's mean
+      # height; worked out from x/y/z and px/py/pz, like the energy
+      - incident_ground_x
+      - incident_ground_y
     layers:
       - 64
       - 128
   multiplicity_token:
     embedding_dim: 128
+    rounds: 1  # of attending to all the detectors
+    heads: 4
   multiplicity_predictor:
     layers:
       - 64
+    # Multiplicity is predicted as a class: one for each multiplicity below
+    # exact_up_to, then classes widening by a factor growth, up to
+    # max_multiplicity. Larger multiplicities are put in the last class.
+    max_multiplicity: 1000
+    exact_up_to: 16
+    growth: 1.25
   detector_tokens:
     embedding_dim: 128
+    layers:
+      - 128
+    learned: true  # add an embedding learned for each detector to its position's
   deposit_encoder:
     inputs:
       - incident_PDG
@@ -32,12 +72,20 @@ model:
       - incident_px
       - incident_py
       - incident_pz
+      - incident_ground_x
+      - incident_ground_y
       - deposit_multiplicity
+      # deposits are ranked by energy, the i-th going in as
+      # (i + 1/2) / multiplicity; it's what tells one subshower's deposit
+      # tokens apart
+      - deposit_rank
     layers:
       - 64
       - 128
   deposit_token:
     embedding_dim: 128
+    rounds: 3  # N, of attending to all the detectors
+    heads: 4
   deposit_PDG_predictor:
     layers:
       - 64
@@ -46,3 +94,29 @@ model:
       - 64
 
 training:
+  # default: <storage_path>/<showers folder>/simpleshower/<run_name>
+  output_dir: null
+  validation_fraction: 0.1
+  # use this many subshowers at random from each set; null for all
+  max_subshowers_per_set: null
+  epochs: 20
+  # null for one pass over the training subshowers that have deposits
+  steps_per_epoch: null
+  # subshowers per step for the multiplicity loss: enough for one pass
+  # over the training subshowers each epoch, but no more than this
+  batch_size: 256
+  deposit_batch_size: 32  # subshowers with deposits per step, for the rest
+  # a subshower with more deposits than this trains on a random selection
+  # of them each step, weighted up to count as much as all of them
+  max_deposits_per_subshower: 64
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-2
+  warmup_steps: 100
+  gradient_clip: 1.0
+  loss_weights:
+    multiplicity: 1.0
+    detector: 1.0
+    pdg: 1.0
+    energy: 1.0
+  seed: 0
+  device: auto  # cuda if there's a GPU, else cpu
