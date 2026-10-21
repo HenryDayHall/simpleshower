@@ -1,0 +1,48 @@
+detectors:
+  generator:
+    name: generate_pierre_auger
+    for_array: stop
+
+model:
+  multiplicity_encoder:
+    inputs:
+      - incident_PDG
+      - incident_x
+      - incident_y
+      - incident_z
+      - incident_px
+      - incident_py
+      - incident_pz
+    layers:
+      - 64
+      - 128
+  multiplicity_token:
+    embedding_dim: 128
+  multiplicity_predictor:
+    layers:
+      - 64
+  detector_tokens:
+    embedding_dim: 128
+  deposit_encoder:
+    inputs:
+      - incident_PDG
+      - incident_x
+      - incident_y
+      - incident_z
+      - incident_px
+      - incident_py
+      - incident_pz
+      - deposit_multiplicity
+    layers:
+      - 64
+      - 128
+  deposit_token:
+    embedding_dim: 128
+  deposit_PDG_predictor:
+    layers:
+      - 64
+  deposit_energy_predictor:
+    layers:
+      - 64
+
+training:
