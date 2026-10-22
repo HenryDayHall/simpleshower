@@ -7,4 +7,6 @@ setup(
     version="0.1.0",
     packages=["simpleshower"],
     install_requires=["numpy", "pyyaml", "torch"],
+    # pip install -e .[corsika]: exporting bundles, and sampling them offline
+    extras_require={"corsika": ["onnx", "onnxscript", "onnxruntime", "pyarrow"]},
 )

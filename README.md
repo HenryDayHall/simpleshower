@@ -52,6 +52,8 @@ The deposit losses use the true multiplicity, and generation the one drawn.
 ## Requirements
 
 - Python 3, `torch`, `numpy`, `pyyaml`, and `matplotlib` for the comparison script
+- For running inside CORSIKA 8: `onnx`, `onnxscript`, `onnxruntime` and `pyarrow`
+  (`pip install -e .[corsika]`), and ONNX Runtime's C++ release to build `plugin/`
 - [subshowers](https://github.com/HenryDayHall/subshowers), importable, with
   its own requirements. `scripts/make_fake_data.py` and the tests use its
   `test/fake_data.py`, so use a clone of the repository rather than a copy of
@@ -202,6 +204,48 @@ subshowers = generator.predict(pdgs, positions, momenta, seed=0)  # (B,), (B, 3)
 The subshowers have the attributes subshowers' `Responses.from_samples`
 reads, so they can be measured with its observables, like the dataset.
 
+## Running inside CORSIKA 8
+
+CORSIKA's `c8_air_shower_surrogate` (added to the CORSIKA8 fork by the surrogate patch)
+takes particles out of the cascade as they are made below the model's thresholds and hands
+them to a model library in batches. Nothing of this repository is built into CORSIKA: it loads
+`plugin/`'s library at run time, and the library reads a bundle.
+
+```bash
+python -m simpleshower.bundle checkpoint_best.pt bundle/      # ONNX graphs, stations, manifest
+cmake -S plugin -B plugin/build -DONNXRUNTIME_ROOT=/path/to/onnxruntime-linux-x64-1.29.0
+cmake --build plugin/build                                     # libsimpleshower_c8.so
+c8_air_shower_surrogate ... --surrogate-bundle bundle/ \
+    --surrogate-model plugin/build/libsimpleshower_c8.so --surrogate-options threads=4
+```
+
+| File | What it is |
+| --- | --- |
+| `bundle/manifest.yaml` | `corsika:` what CORSIKA checks before it runs: the frame (the training showers' observation plane), units, the largest kinetic energies the model takes, its PDG codes, the stations, and the training runs' physics settings, which it compares with its own. `plugin:` what the library needs. `source:` the checkpoint. |
+| `bundle/multiplicity.onnx` | (PDG index, x, y, z, px, py, pz, 2 uniforms) → multiplicity, P(none) |
+| `bundle/deposits.onnx` | (the same, multiplicity, 4 uniforms per deposit token) → detector, PDG index, log10 E |
+| `bundle/stations.csv` | index, id, x, y, z, radius in the frame, for CORSIKA's `StationHits` and the readout |
+
+The graphs take uniform noise in and give draws out, so the seed CORSIKA gives each particle
+decides everything: `sampling.py` makes the noise from it (SplitMix64) exactly as the plugin
+does, so a record-only CORSIKA run sampled later with
+
+```bash
+python -m simpleshower.offline bundle/ run/       # run/surrogate/triggers.parquet -> hits.parquet
+```
+
+gives the same hits as running the plugin inline (up to float32 rounding of energies). Batching
+doesn't change a particle's hits: deposit tokens attend to the detectors, not to each other or to
+other rows. `--resample N` gives each particle N subshowers instead, each with weight 1/N.
+
+`test/test_bundle.py` exports an untrained model and checks the graphs against PyTorch, the
+plugin against `sampling.py` (loading it with ctypes, as CORSIKA does with dlopen), and both
+against themselves batched differently; set `SIMPLESHOWER_C8_PLUGIN` to the built library.
+
+On one core of a cloud VM, with 1636 stations (as many as Auger runs), stage 1 takes about
+17,000 particles a second and stage 2 about 6,000 deposits a second: attending to every station
+is most of the cost, and on a GPU it's far cheaper.
+
 ## Comparing with the dataset
 
 ```bash
@@ -244,7 +288,14 @@ simpleshower/
 ├── model.py      The model, its losses, generation and checkpoints
 ├── data.py       Training examples from subshowers' sampler, and their cache
 ├── train.py      Training from a config
-└── generate.py   Predicting single subshowers
+├── generate.py   Predicting single subshowers
+├── bundle.py     A checkpoint as a CORSIKA bundle: ONNX graphs, stations, manifest
+├── sampling.py   Sampling from a bundle, with per-particle noise from CORSIKA's seeds
+└── offline.py    A bundle run on a CORSIKA run's recorded particles
+plugin/
+├── simpleshower_c8.cpp  The bundle as a CORSIKA model library, with ONNX Runtime
+├── c8_surrogate.h       CORSIKA's model interface (a copy)
+└── CMakeLists.txt
 scripts/
 ├── make_fake_data.py        Fake showers and subshower sets, from a config
 └── compare_with_dataset.py  Held-out subshowers against the model's
@@ -252,7 +303,8 @@ configs/
 ├── default.yaml  Real showers and the Pierre Auger array
 └── example.yaml  Fake showers and a small random array
 test/
-└── test_end_to_end.py  Fake data, training, reloading and generating, in about 10 s
+├── test_end_to_end.py  Fake data, training, reloading and generating, in about 10 s
+└── test_bundle.py      Export, ONNX Runtime against PyTorch, plugin against sampling.py
 ```
 
 ## Tests
