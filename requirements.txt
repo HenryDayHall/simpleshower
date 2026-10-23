@@ -1,0 +1,7 @@
+#torch
+numpy
+pyyaml
+matplotlib  # for scripts/compare_with_dataset.py
+pytest  # for the tests
+# and subshowers, from a clone of https://github.com/HenryDayHall/subshowers
+# (it isn't on PyPI), with its own requirements

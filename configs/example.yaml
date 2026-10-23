@@ -1,0 +1,121 @@
+# A small example on fake showers, which runs in a few minutes on a CPU:
+#
+#   python scripts/make_fake_data.py configs/example.yaml
+#   python -m simpleshower.train configs/example.yaml
+#   python -m simpleshower.generate example_data/PDG22/simpleshower/example/checkpoint_best.pt \
+#       --examples example_data/PDG22/simpleshower/example/validation_examples.npz --index 0
+#
+# The showers come from subshowers' test/fake_data.py, so the physics is
+# made up, and the detector array is a few hundred random triangles around
+# where they land, so that lots of subshowers reach a detector. The model is
+# the same as in default.yaml.
+run_name: example
+
+storage_path: example_data/
+showers:
+  folder: PDG22
+  # e<energy in GeV>_<seed>
+  subfolders: [e2e4_0, e2e4_1, e2e4_2,
+               e3e4_0, e3e4_1, e3e4_2,
+               e4e4_0, e4e4_1, e4e4_2,
+               e5e4_0, e5e4_1, e5e4_2,
+               ]
+subshowers:
+  energy_cuts: [100, 500]
+  leaves_only: true
+
+# only read by scripts/make_fake_data.py
+fake_showers:
+  root_height: [15000.0, 30000.0]  # m, drawn uniformly for each shower
+  lateral: 0.05  # spread of directions at each split
+
+detectors:
+  generator:
+    name: generate_at_ground
+    total: 400
+    distance_from_center: 4000.0
+    mean_width: 200.0
+    std_width: 20.0
+    seed: 0
+
+model:
+  pdgs: []
+  pdg_embedding_dim: 16
+  position_frequencies: 8
+  dropout: 0.1  # in every MLP and attention round
+  multiplicity_encoder:
+    inputs:
+      - incident_PDG
+      - incident_x
+      - incident_y
+      - incident_z
+      - incident_px
+      - incident_py
+      - incident_pz
+      - incident_ground_x
+      - incident_ground_y
+    layers:
+      - 64
+      - 128
+  multiplicity_token:
+    embedding_dim: 128
+    rounds: 1
+    heads: 4
+  multiplicity_predictor:
+    layers:
+      - 64
+    max_multiplicity: 1000
+    exact_up_to: 16
+    growth: 1.25
+  detector_tokens:
+    embedding_dim: 128
+    layers:
+      - 128
+    learned: true
+  deposit_encoder:
+    inputs:
+      - incident_PDG
+      - incident_x
+      - incident_y
+      - incident_z
+      - incident_px
+      - incident_py
+      - incident_pz
+      - incident_ground_x
+      - incident_ground_y
+      - deposit_multiplicity
+      - deposit_rank
+    layers:
+      - 64
+      - 128
+  deposit_token:
+    embedding_dim: 128
+    rounds: 3
+    heads: 4
+  deposit_PDG_predictor:
+    layers:
+      - 64
+  deposit_energy_predictor:
+    layers:
+      - 64
+
+training:
+  output_dir: null
+  validation_fraction: 0.1
+  max_subshowers_per_set: null
+  epochs: 30
+  steps_per_epoch: null
+  batch_size: 256  # at most; see default.yaml
+  deposit_batch_size: 32
+  max_deposits_per_subshower: 64
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-2
+  warmup_steps: 100
+  gradient_clip: 1.0
+  loss_weights:
+    multiplicity: 1.0
+    detector: 1.0
+    pdg: 1.0
+    energy: 1.0
+  seed: 0
+  device: auto
