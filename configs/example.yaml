@@ -13,7 +13,9 @@ run_name: example
 
 storage_path: example_data/
 showers:
-  folder: PDG22
+  # showers folders; with more than one, e.g. [PDG22, PDG11], the outputs in
+  # the commands above are in example_data/simpleshower/example/ instead
+  folders: [PDG22]
   # e<energy in GeV>_<seed>
   subfolders: [e2e4_0, e2e4_1, e2e4_2,
                e3e4_0, e3e4_1, e3e4_2,

@@ -310,11 +310,47 @@ def examples_from_samples(samples, detector_array, source_name=None, check=True)
     )
 
 
+def shower_folders(config):
+    """
+    The showers folders, in storage_path, that the config's showers section
+    lists as folders; or its one folder, if it gives showers: folder as
+    subshowers' configs do.
+    """
+    showers = config["showers"]
+    if "folder" in showers:
+        if "folders" in showers:
+            raise DataError("the showers section has both folder and folders; give just folders")
+        folders = [showers["folder"]]
+    else:
+        folders = showers["folders"]
+    if not (
+        isinstance(folders, list)
+        and folders
+        and all(isinstance(folder, str) and folder for folder in folders)
+    ):
+        raise DataError("showers: folders must be a list of folder names, e.g. [PDG22, PDG11]")
+    return list(dict.fromkeys(folders))
+
+
+def folder_configs(config):
+    """
+    {showers folder: the config with just that one as showers: folder}, for
+    each folder the config lists, as subshowers reads one folder at a time.
+    The subfolders, and the subshowers section, go for every folder.
+    """
+    showers = {key: value for key, value in config["showers"].items() if key != "folders"}
+    return {
+        folder: {**config, "showers": {**showers, "folder": folder}}
+        for folder in shower_folders(config)
+    }
+
+
 def examples_from_config(config, cache_folder, max_per_set=None, seed=0, log=print):
     """
     Examples of every subshower set the config's subshowers section asks
-    for that has been made, as its detectors section's array sees them,
-    without repeats. Sets that aren't made are listed and left out.
+    for, in each of its showers folders, that has been made, as its
+    detectors section's array sees them, without repeats. Sets that aren't
+    made are listed and left out.
 
     Each set's examples are cached in cache_folder, and read from there
     while the set, the array and max_per_set (subshowers taken at random
@@ -329,18 +365,33 @@ def examples_from_config(config, cache_folder, max_per_set=None, seed=0, log=pri
             " each time; give detectors: generator a seed"
         )
     array = detector.from_config(config)
-    checks = datasets.check_subshower_sets(config)
-    ready = [check for check in checks if check.ready]
-    missing = [check for check in checks if not check.ready]
+    folders = folder_configs(config)
+    # the same subfolder, e.g. e1e5_0, can be in more than one showers folder,
+    # so with several, sets are named with their folder in front, and so are
+    # their subshowers' sources, which deduplicated() goes by; with one, by
+    # the subfolder alone, as subshowers names them
+    several = len(folders) > 1
+
+    def named(folder, name):
+        return f"{folder}/{name}" if several else name
+
+    checks = [
+        (folder, check)
+        for folder, folder_config in folders.items()
+        for check in datasets.check_subshower_sets(folder_config)
+    ]
+    ready = [(folder, check) for folder, check in checks if check.ready]
+    missing = [(folder, check) for folder, check in checks if not check.ready]
     log(f"Subshower sets: {len(ready)} of {len(checks)} ready")
-    for check in missing:
-        log(f"  missing {check.label}: {check.problem}")
+    for folder, check in missing:
+        log(f"  missing {named(folder, check.label)}: {check.problem}")
     if not ready:
         raise DataError("none of the config's subshower sets are made")
 
     parts = []
-    for check in ready:
+    for folder, check in ready:
         subshower_set = check.subshower_set
+        source_name = named(folder, subshower_set.shower.subfolder)
         # the history is only ever read, so its size and time say if it's remade
         history = os.stat(generation.history_path(subshower_set.shower.folder))
         settings = {
@@ -351,9 +402,9 @@ def examples_from_config(config, cache_folder, max_per_set=None, seed=0, log=pri
             "max_per_set": max_per_set,
             "seed": seed,
         }
-        name = f"{subshower_set.shower.subfolder}_e{subshower_set.energy_cut}".replace(
-            os.sep, "_"
-        )
+        name = named(
+            folder, f"{subshower_set.shower.subfolder}_e{subshower_set.energy_cut}"
+        ).replace(os.sep, "_")
         path = os.path.join(cache_folder, f"{name}.npz")
         examples = None
         if os.path.isfile(path):
@@ -378,15 +429,13 @@ def examples_from_config(config, cache_folder, max_per_set=None, seed=0, log=pri
                         sampler.rng.choice(len(sampler), max_per_set, replace=False)
                     )
                     samples = (sampler[int(i)] for i in chosen)
-                examples = examples_from_samples(
-                    samples, array, source_name=subshower_set.shower.subfolder
-                )
+                examples = examples_from_samples(samples, array, source_name=source_name)
             source.release()
             examples.metadata = {"settings": settings}
             examples.save(path)
             how = f"sampled in {time.monotonic() - started:.0f} s"
         log(
-            f"  {check.label}: {len(examples)} subshowers,"
+            f"  {named(folder, check.label)}: {len(examples)} subshowers,"
             f" {examples.detected.sum()} with deposits ({how})"
         )
         parts.append(examples)

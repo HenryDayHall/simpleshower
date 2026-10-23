@@ -1,10 +1,12 @@
 run_name: default
 
-# The subshowers to train on, as in subshowers' configs/default.yaml;
+# The subshowers to train on, as in subshowers' configs/default.yaml, but
+# from any number of showers folders, each with these subfolders;
 # subshowers.datasets finds which of these sets are made.
 storage_path: /data/dust/user/dayhallh/eas/data/
 showers:
-  folder: PDG22
+  # list more, e.g. [PDG22, PDG11], to train one model on them all
+  folders: [PDG22]
   subfolders: [e1e5_0,
                e1e6_0,
                e1e7_0,
@@ -94,7 +96,8 @@ model:
       - 64
 
 training:
-  # default: <storage_path>/<showers folder>/simpleshower/<run_name>
+  # default: <storage_path>/<showers folder>/simpleshower/<run_name>, or
+  # <storage_path>/simpleshower/<run_name> with more than one showers folder
   output_dir: null
   validation_fraction: 0.1
   # use this many subshowers at random from each set; null for all

@@ -102,6 +102,23 @@ on (make them with subshowers' `scripts/generate_data_from_config.py`), and a
 `detectors` section for the array — the Pierre Auger surface detector here.
 A random array needs a `seed`, so it's the same array every time.
 
+The one difference is that `showers` lists `folders` rather than one
+`folder`, so a model can be trained and validated on the showers of several
+primaries at once:
+
+```yaml
+showers:
+  folders: [PDG22, PDG11]
+  subfolders: [e1e5_0, e1e6_0, e1e7_0]
+```
+
+The subfolders are looked for in each folder (make each folder's showers
+with a subshowers config of its own), and with more than one folder the
+sets are named with their folder in front, as in `PDG11/e1e5_0`. The model
+only sees the particle that starts each subshower, not the shower's primary,
+so nothing else changes. A `showers` section with one `folder`, as in
+subshowers' configs, still works.
+
 ```bash
 python -m simpleshower.train configs/default.yaml [--epochs N] [--device cuda]
                                                   [--max-subshowers-per-set N] [--output-dir DIR]
@@ -109,7 +126,8 @@ python -m simpleshower.train configs/default.yaml [--epochs N] [--device cuda]
 
 Sets the config asks for that aren't made are listed and left out. Outputs
 go to `training: output_dir`, by default
-`<storage_path>/<showers folder>/simpleshower/<run_name>/`:
+`<storage_path>/<showers folder>/simpleshower/<run_name>/`, or
+`<storage_path>/simpleshower/<run_name>/` with more than one showers folder:
 
 | File | What it is |
 | --- | --- |

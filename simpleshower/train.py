@@ -6,8 +6,11 @@ array sees them.
 
 The config's storage_path, showers and subshowers sections say which
 subshower sets to use, as in subshowers' configs (subshowers.datasets finds
-the ones that are made), and its detectors section the array. Everything is
-written to training: output_dir, by default <showers folder>/simpleshower/<run_name>:
+the ones that are made), and its detectors section the array; showers:
+folders lists the showers folders, which can be more than one, each with
+the same subfolders. Everything is written to training: output_dir, by
+default <showers folder>/simpleshower/<run_name>, or
+<storage_path>/simpleshower/<run_name> with more than one showers folder:
 
     examples/                the training examples of each subshower set, cached
     config.yaml              the config as trained, with model: pdgs filled in
@@ -30,7 +33,7 @@ import numpy as np
 import torch
 import yaml
 
-from simpleshower.data import MODEL_COLUMNS, DataError, examples_from_config
+from simpleshower.data import MODEL_COLUMNS, DataError, examples_from_config, folder_configs
 from simpleshower.model import Model
 
 # training settings that the config's training section can change
@@ -67,7 +70,12 @@ def output_folder(config, settings):
     from subshowers.generation import showers_folder
 
     run_name = config.get("run_name") or "default"
-    return os.path.join(showers_folder(config), "simpleshower", str(run_name))
+    folders = list(folder_configs(config).values())
+    if len(folders) == 1:
+        base = showers_folder(folders[0])
+    else:  # no one showers folder holds them all
+        base = os.path.abspath(config["storage_path"])
+    return os.path.join(base, "simpleshower", str(run_name))
 
 
 def pick_device(name):

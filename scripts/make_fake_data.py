@@ -4,9 +4,10 @@ Fake showers, for trying SimpleShower out without CORSIKA.
     python scripts/make_fake_data.py configs/example.yaml
 
 makes the showers and subshower sets the config names, in the layout
-subshowers expects: each shower in the showers section is grown with
-subshowers' test/fake_data.py, with the energy (GeV) and seed in its folder
-name (e<energy>_<seed>), and split with each of subshowers: energy_cuts.
+subshowers expects: each shower in the showers section, in each of its
+folders, is grown with subshowers' test/fake_data.py, with the energy (GeV)
+and seed in its folder name (e<energy>_<seed>), and split with each of
+subshowers: energy_cuts.
 The config's fake_showers section sets where the showers start and how
 much they spread.
 
@@ -27,7 +28,7 @@ import yaml
 
 # run as scripts/make_fake_data.py, simpleshower is the folder above
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from simpleshower.data import mass  # noqa: E402
+from simpleshower.data import folder_configs, mass  # noqa: E402
 
 DEFAULT_FAKE_SHOWERS = {"root_height": [15000.0, 30000.0], "lateral": 0.05}
 
@@ -72,11 +73,21 @@ def main(argv=None):
     settings = dict(DEFAULT_FAKE_SHOWERS)
     settings.update(config.get("fake_showers") or {})
     low, high = settings["root_height"]
+    folders = folder_configs(config)
 
-    for number, shower in enumerate(generation.wanted_showers(config)):
+    def named(folder, subfolder):
+        # with several showers folders, which one
+        return f"{folder}/{subfolder}" if len(folders) > 1 else subfolder
+
+    showers = [
+        (folder, shower)
+        for folder, folder_config in folders.items()
+        for shower in generation.wanted_showers(folder_config)
+    ]
+    for number, (folder, shower) in enumerate(showers):
         history = generation.history_path(shower.folder)
         if os.path.isfile(history):
-            print(f"{shower.subfolder}: already made")
+            print(f"{named(folder, shower.subfolder)}: already made")
         else:
             energy = shower.energy or 3.0e4
             seed = number if shower.seed is None else shower.seed
@@ -87,13 +98,21 @@ def main(argv=None):
                 data["pdg"][0] = shower.pdg
             fake_data.fake_history(shower.folder, physical_momenta(data))
             print(
-                f"{shower.subfolder}: {len(data['label'])} particles,"
+                f"{named(folder, shower.subfolder)}: {len(data['label'])} particles,"
                 f" {energy:.3g} GeV from {height / 1000:.1f} km"
             )
 
-    for subshower_set in generation.wanted_subshower_sets(config):
+    subshower_sets = [
+        (folder, subshower_set)
+        for folder, folder_config in folders.items()
+        for subshower_set in generation.wanted_subshower_sets(folder_config)
+    ]
+    for folder, subshower_set in subshower_sets:
         wanted = (subshower_set.energy_cut, subshower_set.leaves_only)
-        label = f"{subshower_set.shower.subfolder}, energy cut {subshower_set.energy_cut} GeV"
+        label = (
+            f"{named(folder, subshower_set.shower.subfolder)},"
+            f" energy cut {subshower_set.energy_cut} GeV"
+        )
         if generation.saved_settings(subshower_set.output) == wanted:
             print(f"{label}: already made")
             continue
