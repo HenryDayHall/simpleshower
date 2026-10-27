@@ -1,4 +1,4 @@
-run_name: default
+run_name: default_2
 
 # The subshowers to train on, as in subshowers' configs/default.yaml, but
 # from any number of showers folders, each with these subfolders;
@@ -6,7 +6,7 @@ run_name: default
 storage_path: /data/dust/user/dayhallh/eas/data/
 showers:
   # list more, e.g. [PDG22, PDG11], to train one model on them all
-  folders: [PDG22]
+  folders: [PDG22, PDG11]
   subfolders: [e1e5_0,
                e1e6_0,
                e1e7_0,
