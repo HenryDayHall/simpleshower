@@ -24,7 +24,8 @@ Prediction process;
 
 The training data are subshowers from
 [subshowers](https://github.com/HenryDayHall/subshowers), as its
-`SubshowerSampler` sees them through the config's detector array. A
+`SubshowerSampler` sees them through the config's detector array, each moved
+across the ground first (see [Shifting subshowers](#shifting-subshowers)). A
 **deposit** is one leaf particle hitting one detector: the detector, the
 leaf's PDG and its kinetic energy. Summed per detector, a subshower's
 deposits give the sampler's `energy_per_detector` (checked as the examples
@@ -55,9 +56,10 @@ The deposit losses use the true multiplicity, and generation the one drawn.
 - For running inside CORSIKA 8: `onnx`, `onnxscript`, `onnxruntime` and `pyarrow`
   (`pip install -e .[corsika]`), and ONNX Runtime's C++ release to build `plugin/`
 - [subshowers](https://github.com/HenryDayHall/subshowers), importable, with
-  its own requirements. `scripts/make_fake_data.py` and the tests use its
-  `test/fake_data.py`, so use a clone of the repository rather than a copy of
-  the package.
+  its own requirements, and recent enough that its `SubshowerSampler` shifts
+  subshowers (it takes `shift` and `max_shift`). `scripts/make_fake_data.py`
+  and the tests use its `test/fake_data.py`, so use a clone of the repository
+  rather than a copy of the package.
 
 ```bash
 git clone https://github.com/HenryDayHall/subshowers
@@ -77,22 +79,27 @@ python -m simpleshower.train configs/example.yaml
 `make_fake_data.py` grows the 12 showers `configs/example.yaml` lists with
 subshowers' `test/fake_data.py`, and splits them with energy cuts of 100 and
 500 GeV, into `example_data/` (about 20 s). Training samples them with a
-detector array of 400 random triangles (about a minute, then cached), and
-trains for 30 epochs (about 2.5 minutes on two CPU cores). Of the 5106
-subshowers, 3018 have deposits; 10% are held out.
+detector array of 400 random triangles, shifting each subshower by up to
+4.1 km across it (about a minute, then cached), and trains for 30 epochs
+(about 2.5 minutes on two CPU cores). Of the 5106 subshowers, 2205 have
+deposits (3018 without the shifts, as the array is centred where the
+showers land); 10% are held out.
 
 At the best epoch, the held-out losses are
 
 | | loss | accuracy |
 | --- | --- | --- |
-| multiplicity | 1.54 | 71% right about whether there are any deposits |
-| detector | 1.96 | 37% of deposits in the highest-attention detector |
-| PDG | 1.61 | 21% |
-| log energy | −0.08 | |
+| multiplicity | 1.33 | 77% right about whether there are any deposits |
+| detector | 2.15 | 33% of deposits in the highest-attention detector |
+| PDG | 1.61 | 22% |
+| log energy | 0.06 | |
 
 For comparison, the detector nearest to where the start particle's track
-lands is right for 28% of deposits, and a Gaussian about that point (with
-its width fitted) has a detector loss of 2.12. The fake cascades pick each
+lands is right for 30% of deposits, and a Gaussian about that point, its
+width fitted to the training deposits (234 m), has a detector loss of 2.02,
+lower than the model's. Without the shifts the model beats the Gaussian
+(1.96 against 2.16), with the deposits crowded onto the detectors around the
+showers' cores (see [Limitations](#limitations)). The fake cascades pick each
 particle's PDG at random from five, so the PDG loss can't go below
 ln 5 = 1.61 here.
 
@@ -133,7 +140,7 @@ go to `training: output_dir`, by default
 
 | File | What it is |
 | --- | --- |
-| `examples/` | Each subshower set's training examples, cached; made again if the set, the array or the sampling options change |
+| `examples/` | Each subshower set's training examples, cached; made again if the set, the array or the sampling options (`max_subshowers_per_set`, `shift`, `max_shift`, `seed`) change |
 | `config.yaml` | The config as trained, with `model: pdgs` filled in from the data |
 | `checkpoint_best.pt` | The model after the epoch with the lowest held-out loss |
 | `checkpoint_last.pt` | The model after the last epoch |
@@ -150,6 +157,31 @@ over the subshowers with deposits. With an array as sparse as Pierre Auger's,
 most subshowers deposit nothing; they still teach the multiplicity. A
 subshower with more than `max_deposits_per_subshower` deposits trains on a
 random selection of them each step, weighted to count as much as all of them.
+
+### Shifting subshowers
+
+A shower's subshowers are simulated around its core, so as they are, they'd
+reach only the detectors near where the training showers' cores fall. A
+subshower is much the same wherever it falls, as the atmosphere changes with
+height but not with x and y, so subshowers' sampler moves each one across
+the ground first, by a random shift in x and y spread evenly over a disc, and
+the examples are of the shifted subshowers. That way the model learns about
+every detector of the array.
+
+```yaml
+training:
+  shift: true      # false keeps subshowers where they were simulated
+  max_shift: null  # m; null for half the width of the array (36.6 km for Auger)
+```
+
+An example's incident particle starts where the shifted subshower does, its
+deposits are those the shifted leaves make, and `Examples.shift` records how
+far it was moved: the incident x and y less the shift are where the history
+has its start particle. `generate.py --examples` prints the shift with the
+dataset's subshower. Each set's shifts are drawn from `training: seed` and
+the set, so they differ from set to set and the cached examples are the same
+every time; changing `shift`, `max_shift` or `seed` makes them again. Each
+subshower is used once a run, at one place.
 
 ## Predicting single subshowers
 
@@ -260,13 +292,13 @@ checkpoint. For the fake showers:
 
 | | dataset | model |
 | --- | --- | --- |
-| fraction with deposits | 0.56 | 0.54 |
-| deposits per subshower | 1.92 | 1.88 |
-| detectors hit per subshower | 1.09 | 1.25 |
-| energy deposited per subshower | 1.78 GeV | 1.78 GeV |
-| median energy deposited, of those with deposits | 2.04 GeV | 2.06 GeV |
+| fraction with deposits | 0.46 | 0.44 |
+| deposits per subshower | 1.45 | 1.40 |
+| detectors hit per subshower | 0.87 | 1.02 |
+| energy deposited per subshower | 1.30 GeV | 1.30 GeV |
+| median energy deposited, of those with deposits | 1.94 GeV | 1.98 GeV |
 
-44% of the model's deposits are in a detector the dataset's subshower hit.
+33% of the model's deposits are in a detector the dataset's subshower hit.
 
 ## Limitations
 
@@ -274,8 +306,16 @@ checkpoint. For the fake showers:
   describes, so a subshower's deposits are drawn independently, given the
   incident particle, the multiplicity and their ranks. The model can't say
   "all in this detector, or all in that one", which is why it spreads deposits
-  over more detectors than the dataset (1.25 against 1.09 above). Self-attention
+  over more detectors than the dataset (1.02 against 0.87 above). Self-attention
   between the deposit tokens in each round would be the natural next step.
+- Each subshower is used once a run, at one place. Shifted across the array,
+  the same subshowers are shared among more of its detectors: in the example,
+  the training deposits fall on 387 of the 400 detectors, where without the
+  shifts they fell on 239, and 43% of them on the busiest 20. So each
+  detector has fewer examples to learn from, and training longer overfits:
+  over 90 epochs, the training detector loss falls to 1.60 while the held-out
+  one rises to 2.31. Shifting each subshower to several places would give
+  every detector more examples.
 - Without `deposit_rank` in `deposit_encoder: inputs`, every deposit token of
   a subshower is the same, and its deposits are drawn from one distribution.
 - Held-out subshowers are chosen at random, so subshowers of the same
@@ -304,6 +344,7 @@ configs/
 └── example.yaml  Fake showers and a small random array
 test/
 ├── test_end_to_end.py  Fake data, training, reloading and generating, in about 10 s
+├── test_data.py        Examples of shifted subshowers, their settings and cache (no torch)
 └── test_bundle.py      Export, ONNX Runtime against PyTorch, plugin against sampling.py
 ```
 

@@ -102,6 +102,14 @@ training:
   validation_fraction: 0.1
   # use this many subshowers at random from each set; null for all
   max_subshowers_per_set: null
+  # Move each subshower across the ground, by a random shift in x and y,
+  # before the array sees it, so subshowers reach detectors all over the
+  # array rather than just near where the showers' cores fall. The shifts
+  # are drawn from seed and the set, so the examples are the same each time.
+  shift: true
+  # the furthest a subshower is moved, in m; null for half the width of the
+  # array, 36.6 km for the Pierre Auger surface detector
+  max_shift: null
   epochs: 20
   # null for one pass over the training subshowers that have deposits
   steps_per_epoch: null

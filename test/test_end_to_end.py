@@ -75,6 +75,8 @@ def test_checkpoints_reload(run):
     with open(os.path.join(run, "config.yaml")) as f:
         saved = yaml.safe_load(f)
     assert saved["model"]["pdgs"], "train.py should fill in the PDG codes"
+    # subshowers are shifted by up to half the array's width, unless told otherwise
+    assert saved["training"]["shift"] is True and saved["training"]["max_shift"] is None
     with open(os.path.join(run, "log.csv")) as f:
         assert len(f.readlines()) == 3  # header and two epochs
 
@@ -122,6 +124,7 @@ def test_generate_command_line(run, capsys):
     generate.main([checkpoint, "--examples", examples, "--index", "0", "--samples", "2"])
     printed = capsys.readouterr().out
     assert "In the dataset" in printed and "Predicted subshower 2" in printed
+    assert "shifted (" in printed  # from where the history has it
     generate.main([checkpoint, "--pdg", "22", "--position", "0", "0", "5000",
                    "--momentum", "0", "0", "-50", "--greedy"])
     assert "Most likely subshower" in capsys.readouterr().out
@@ -161,6 +164,8 @@ def test_several_shower_folders(config, run, two_folder_run):
     # subfolders, aren't taken for repeats of them
     assert np.array_equal(examples.source[in_pdg22], np.char.add("PDG22/", alone.source))
     assert np.array_equal(examples.start_index[in_pdg22], alone.start_index)
+    # shifted the same way, whatever else they're trained with
+    assert np.array_equal(examples.shift[in_pdg22], alone.shift)
     assert in_pdg11.any()
     # by default, outputs go in the showers folder, or in storage_path for several
     settings = dict(both["training"], output_dir=None)

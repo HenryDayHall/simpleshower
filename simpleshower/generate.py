@@ -191,6 +191,9 @@ def from_examples(examples, i, n_detectors):
     """Subshower i of some Examples, as a GeneratedSubshower."""
     detector, pdg, energy = examples.deposits(i)
     incident = {name: column[i] for name, column in examples.incident.items()}
+    dx, dy = examples.shift[i]
+    # the incident position is the shifted subshower's, not the history's
+    shifted = f", shifted ({dx:.1f}, {dy:.1f}) m" if dx or dy else ""
     return GeneratedSubshower(
         start_pdg=int(incident["pdg"]),
         start_position=np.array([incident[c] for c in ["x", "y", "z"]]),
@@ -201,7 +204,10 @@ def from_examples(examples, i, n_detectors):
         deposit_pdg=pdg,
         deposit_energy=energy,
         n_detectors=n_detectors,
-        source=f"dataset ({examples.source[i]}, start particle {examples.start_index[i]})",
+        source=(
+            f"dataset ({examples.source[i]}, start particle"
+            f" {examples.start_index[i]}{shifted})"
+        ),
     )
 
 

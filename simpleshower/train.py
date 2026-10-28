@@ -41,6 +41,11 @@ DEFAULTS = {
     "output_dir": None,
     "validation_fraction": 0.1,
     "max_subshowers_per_set": None,  # subshowers taken at random from each set
+    # move each subshower across the ground, by a random shift in x and y,
+    # before the array sees it (subshowers' SubshowerSampler), so subshowers
+    # reach detectors all over the array, not just near their showers' cores
+    "shift": True,
+    "max_shift": None,  # m; None for half the width of the array
     "epochs": 20,
     "steps_per_epoch": None,  # default: one pass over the subshowers with deposits
     # subshowers per step for the multiplicity loss: enough for one pass over
@@ -226,6 +231,8 @@ def train(config, output_dir=None, log=print):
         os.path.join(folder, "examples"),
         max_per_set=settings["max_subshowers_per_set"],
         seed=seed,
+        shift=settings["shift"],
+        max_shift=settings["max_shift"],
         log=log,
     )
     training, validation = examples.split(settings["validation_fraction"], seed)

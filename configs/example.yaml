@@ -105,6 +105,8 @@ training:
   output_dir: null
   validation_fraction: 0.1
   max_subshowers_per_set: null
+  shift: true  # across the ground, see default.yaml
+  max_shift: null  # m; half the width of the array, 4.1 km here
   epochs: 30
   steps_per_epoch: null
   batch_size: 256  # at most; see default.yaml

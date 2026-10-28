@@ -6,15 +6,24 @@ particle), and its deposits, one for each detector each of its leaves hits,
 with the detector, the leaf's PDG and its kinetic energy. Summed over the
 deposits in each detector they give the sampler's energy_per_detector.
 
+Unless told not to, the sampler moves each subshower across the ground, by a
+random shift in x and y, before the array sees it (see subshowers'
+SubshowerSampler), so that subshowers simulated around their showers' cores
+reach detectors all over the array. An example is of the shifted subshower:
+its incident particle starts where the shifted one does, its deposits are
+those the shifted leaves make, and its shift says how far it was moved.
+
 Working out which leaves hit which detectors takes a pass over every
 subshower, so each subshower set's examples are cached, and used again while
 the set, the detector array and the sampling options stay the same.
 """
 
 import json
+import math
 import os
 import time
 import warnings
+import zlib
 
 import numpy as np
 
@@ -22,7 +31,10 @@ import numpy as np
 INCIDENT_COLUMNS = ["pdg", "x", "y", "z", "px", "py", "pz", "kinetic_energy", "time"]
 # what the model reads of it
 MODEL_COLUMNS = ["pdg", "x", "y", "z", "px", "py", "pz"]
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+# load reads these; version 1 files are from before examples kept their
+# shifts, when subshowers weren't shifted
+READABLE_VERSIONS = (1, 2)
 
 # GeV; for working out kinetic energy from momentum
 MASSES = {
@@ -82,6 +94,11 @@ class Examples:
     Many subshowers: one row of incident values each, and their deposits as
     flat arrays, subshower i's being deposit_offsets[i]:deposit_offsets[i + 1],
     in order of energy, highest first.
+
+    shift is how far the sampler moved each subshower across the ground,
+    (dx, dy) in m. The incident values and deposits are the shifted
+    subshower's, so subtracting the shift from the incident x and y gives
+    where the history has the start particle (start_index).
     """
 
     def __init__(
@@ -94,6 +111,7 @@ class Examples:
         source,
         start_index,
         metadata=None,
+        shift=None,
     ):
         n = len(deposit_offsets) - 1
         self.incident = {
@@ -106,6 +124,11 @@ class Examples:
         self.deposit_energy = np.asarray(deposit_energy, dtype=np.float64)
         self.source = np.asarray(source, dtype=str).reshape(n)
         self.start_index = np.asarray(start_index, dtype=np.int64).reshape(n)
+        self.shift = (
+            np.zeros((n, 2))
+            if shift is None
+            else np.asarray(shift, dtype=np.float64).reshape(n, 2)
+        )
         self.metadata = dict(metadata or {})
         if self.deposit_offsets[0] != 0 or self.deposit_offsets[-1] != len(
             self.deposit_detector
@@ -149,6 +172,7 @@ class Examples:
             self.source[indices],
             self.start_index[indices],
             self.metadata,
+            shift=self.shift[indices],
         )
 
     @classmethod
@@ -169,6 +193,7 @@ class Examples:
             np.concatenate([part.source for part in parts]),
             np.concatenate([part.start_index for part in parts]),
             metadata,
+            shift=np.concatenate([part.shift for part in parts]),
         )
 
     def deduplicated(self):
@@ -209,6 +234,7 @@ class Examples:
             "deposit_energy": self.deposit_energy,
             "source": self.source,
             "start_index": self.start_index,
+            "shift": self.shift,
         }
         for name, column in self.incident.items():
             arrays[f"incident_{name}"] = column
@@ -222,8 +248,11 @@ class Examples:
     def load(cls, path):
         with np.load(path, allow_pickle=False) as data:
             version = int(data["format_version"])
-            if version != FORMAT_VERSION:
-                raise ValueError(f"{path} has format version {version}, not {FORMAT_VERSION}")
+            if version not in READABLE_VERSIONS:
+                raise ValueError(
+                    f"{path} has format version {version}; versions"
+                    f" {', '.join(map(str, READABLE_VERSIONS))} can be read"
+                )
             return cls(
                 {name: data[f"incident_{name}"] for name in INCIDENT_COLUMNS},
                 data["deposit_offsets"],
@@ -233,6 +262,8 @@ class Examples:
                 data["source"],
                 data["start_index"],
                 json.loads(data["metadata"].item()),
+                # version 1 kept no shifts, as its subshowers weren't shifted
+                shift=data["shift"] if "shift" in data.files else None,
             )
 
     @staticmethod
@@ -244,10 +275,23 @@ class Examples:
 # --------------------------------------------------- from the sampler
 
 
+def shift_of(sample):
+    """
+    How far the sampler moved a sampling.DetectedSample across the ground,
+    (dx, dy) in m; nothing for a sampler that doesn't shift subshowers.
+    """
+    shift = getattr(sample, "shift", None)
+    if shift is None:
+        return np.zeros(2)
+    return np.asarray(shift, dtype=np.float64).reshape(-1)[:2]
+
+
 def deposits_of(sample, detector_array):
     """
     (detector, pdg, energy) of each deposit of a sampling.DetectedSample,
     highest energy first: one for each detector each detected leaf hits.
+    The leaves are moved across the ground by the sample's shift, as the
+    sampler moved them to see which detectors they hit.
     """
     from subshowers.sampling import history_columns
 
@@ -257,6 +301,10 @@ def deposits_of(sample, detector_array):
     columns, positions_of = history_columns(sample.source.reader)
     positions = positions_of(leaves)
     starts = np.stack([columns[c][positions] for c in ["x", "y", "z"]], axis=-1)
+    dx, dy = shift_of(sample)
+    if dx or dy:
+        # a new array, so the history itself stays where it was
+        starts = starts + np.array([dx, dy, 0.0])
     directions = np.stack([columns[c][positions] for c in ["px", "py", "pz"]], axis=-1)
     leaf, detector = np.nonzero(detector_array.hit_any(starts, directions))
     energy = columns["kinetic_energy"][positions][leaf]
@@ -266,10 +314,13 @@ def deposits_of(sample, detector_array):
 
 
 def examples_from_samples(samples, detector_array, source_name=None, check=True):
-    """Examples of some sampling.DetectedSamples."""
+    """
+    Examples of some sampling.DetectedSamples, of the subshowers where the
+    sampler had them: shifted, if it shifted them.
+    """
     incident = {name: [] for name in INCIDENT_COLUMNS}
     offsets, detectors, pdgs, energies = [0], [], [], []
-    sources, starts = [], []
+    sources, starts, shifts = [], [], []
     n_detectors = len(detector_array)
     for sample in samples:
         detector, pdg, energy = deposits_of(sample, detector_array)
@@ -282,6 +333,7 @@ def examples_from_samples(samples, detector_array, source_name=None, check=True)
                 f" {sample.source.name} don't add up to its energy_per_detector"
             )
         incident["pdg"].append(int(sample.start_pdg))
+        # where the shifted subshower starts
         for axis, name in enumerate(["x", "y", "z"]):
             incident[name].append(sample.start_position[axis])
         # the sampler's start_direction is the start particle's px, py, pz
@@ -295,6 +347,7 @@ def examples_from_samples(samples, detector_array, source_name=None, check=True)
         offsets.append(offsets[-1] + len(detector))
         sources.append(source_name or sample.source.name)
         starts.append(sample.start_index)
+        shifts.append(shift_of(sample))
 
     def joined(parts, dtype):
         return np.concatenate(parts) if parts else np.zeros(0, dtype)
@@ -307,6 +360,7 @@ def examples_from_samples(samples, detector_array, source_name=None, check=True)
         joined(energies, np.float64),
         sources,
         starts,
+        shift=np.reshape(np.asarray(shifts, dtype=np.float64), (-1, 2)),
     )
 
 
@@ -345,26 +399,67 @@ def folder_configs(config):
     }
 
 
-def examples_from_config(config, cache_folder, max_per_set=None, seed=0, log=print):
+def shift_distance(array, shift=True, max_shift=None):
+    """
+    The furthest (m) subshowers are moved across the ground before the
+    array sees them: max_shift, or by default half the width of the array
+    (subshowers' detector.max_shift); 0 without shift.
+    """
+    from subshowers import detector
+
+    if not isinstance(shift, bool):
+        raise DataError(f"training: shift must be true or false, not {shift!r}")
+    if not shift:
+        return 0.0
+    if max_shift is None:
+        return float(detector.max_shift(array))
+    try:
+        distance = math.nan if isinstance(max_shift, bool) else float(max_shift)
+    except (TypeError, ValueError):
+        distance = math.nan
+    if not (math.isfinite(distance) and distance >= 0):
+        raise DataError(
+            "training: max_shift must be a distance in m, at least 0, or null for"
+            f" half the width of the array, not {max_shift!r}"
+        )
+    return distance
+
+
+def examples_from_config(
+    config, cache_folder, max_per_set=None, seed=0, shift=True, max_shift=None, log=print
+):
     """
     Examples of every subshower set the config's subshowers section asks
     for, in each of its showers folders, that has been made, as its
     detectors section's array sees them, without repeats. Sets that aren't
     made are listed and left out.
 
+    With shift, the sampler moves each subshower across the ground, by a
+    random shift in x and y of up to max_shift m (by default half the width
+    of the array), before the array sees it, so the examples cover every
+    detector rather than just those near the showers' cores. Each set's
+    shifts, and the subshowers max_per_set takes at random from it (all if
+    None), come from seed and the set, so they differ from set to set and
+    are the same every time.
+
     Each set's examples are cached in cache_folder, and read from there
-    while the set, the array and max_per_set (subshowers taken at random
-    from each set; all if None) stay the same.
+    while the set, the array and these options stay the same.
     """
     from subshowers import datasets, detector, generation
     from subshowers.sampling import SubshowerSampler
 
+    if not hasattr(detector, "max_shift"):
+        raise DataError(
+            "this subshowers is too old to shift subshowers across the ground;"
+            " update it to one whose SubshowerSampler takes shift and max_shift"
+        )
     if detector.is_unseeded(config):
         raise DataError(
             "the detector array is random and has no seed, so it would be different"
             " each time; give detectors: generator a seed"
         )
     array = detector.from_config(config)
+    distance = shift_distance(array, shift, max_shift)
     folders = folder_configs(config)
     # the same subfolder, e.g. e1e5_0, can be in more than one showers folder,
     # so with several, sets are named with their folder in front, and so are
@@ -387,6 +482,10 @@ def examples_from_config(config, cache_folder, max_per_set=None, seed=0, log=pri
         log(f"  missing {named(folder, check.label)}: {check.problem}")
     if not ready:
         raise DataError("none of the config's subshower sets are made")
+    if distance > 0:
+        log(f"Subshowers are shifted across the ground by up to {distance:.6g} m")
+    else:
+        log("Subshowers aren't shifted: they're where they were simulated")
 
     parts = []
     for folder, check in ready:
@@ -401,7 +500,16 @@ def examples_from_config(config, cache_folder, max_per_set=None, seed=0, log=pri
             "detectors": config["detectors"],
             "max_per_set": max_per_set,
             "seed": seed,
+            # how far subshowers are moved across the ground (m); 0 for not at all
+            "max_shift": distance,
         }
+        # the set's own random numbers, for its shifts and the subshowers
+        # max_per_set takes, so no two sets have the same ones; the set is
+        # named with its folder, so they're the same whatever else is trained on
+        set_key = f"{folder}/{subshower_set.shower.subfolder}/e{subshower_set.energy_cut}"
+        set_rng = np.random.default_rng(
+            None if seed is None else [seed, zlib.crc32(set_key.encode())]
+        )
         name = named(
             folder, f"{subshower_set.shower.subfolder}_e{subshower_set.energy_cut}"
         ).replace(os.sep, "_")
@@ -421,7 +529,14 @@ def examples_from_config(config, cache_folder, max_per_set=None, seed=0, log=pri
             source = check.source()
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                sampler = SubshowerSampler([source], array, seed=seed, max_open=1)
+                sampler = SubshowerSampler(
+                    [source],
+                    array,
+                    seed=set_rng,
+                    max_open=1,
+                    shift=distance > 0,
+                    max_shift=distance if distance > 0 else None,
+                )
                 if max_per_set is None or max_per_set >= len(sampler):
                     samples = sampler.iter_epoch(shuffle=False)
                 else:
