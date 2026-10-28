@@ -1,4 +1,4 @@
-run_name: default_2
+run_name: default_3
 
 # The subshowers to train on, as in subshowers' configs/default.yaml, but
 # from any number of showers folders, each with these subfolders;
