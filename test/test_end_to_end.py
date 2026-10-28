@@ -79,6 +79,45 @@ def test_checkpoints_reload(run):
     assert saved["training"]["shift"] is True and saved["training"]["max_shift"] is None
     with open(os.path.join(run, "log.csv")) as f:
         assert len(f.readlines()) == 3  # header and two epochs
+    # kept: before training, and after epoch 2
+    kept = sorted(os.listdir(os.path.join(run, "checkpoints")))
+    assert kept == ["epoch_0000.pt", "epoch_0002.pt"]
+    assert Model.load(os.path.join(run, "checkpoints", "epoch_0000.pt")).n_detectors == 400
+
+
+def test_training_until_annealed(config, tmp_path, monkeypatch):
+    """
+    With epochs: -1, training stops once the learning rate has annealed: here
+    the held-out losses never fall after the first epoch, so it's fixed for 3
+    epochs, then anneals over 3.
+    """
+    import csv
+
+    flat = {"multiplicity": 1.0, "detector": 2.0, "pdg": 1.6, "energy": 0.1, "total": 4.7}
+    monkeypatch.setattr(train, "evaluate", lambda *args: dict(flat))
+    until = copy.deepcopy(config)
+    until["training"].update(
+        output_dir=str(tmp_path / "run"),
+        epochs=-1,
+        plateau_epochs=2,
+        cosine_epochs=3,
+        warmup_steps=2,
+    )
+    lines = []
+    folder = train.train(until, log=lines.append)
+    with open(os.path.join(folder, "log.csv")) as f:
+        rows = list(csv.DictReader(f))
+    assert [row["phase"] for row in rows] == ["fixed"] * 3 + ["annealing"] * 3
+    rates = [float(row["learning_rate"]) for row in rows]
+    learning_rate = until["training"]["learning_rate"]
+    assert rates[:3] == [learning_rate] * 3
+    assert rates[3] > rates[4] > rates[5] > 0.1 * learning_rate
+    assert any("annealing the learning rate over the next 3" in line for line in lines)
+    assert any("has annealed, after 6 epochs" in line for line in lines)
+    kept = sorted(os.listdir(os.path.join(folder, "checkpoints")))
+    assert kept == ["epoch_0000.pt", "epoch_0002.pt", "epoch_0004.pt"]
+    last = torch.load(os.path.join(folder, "checkpoint_last.pt"), weights_only=False)
+    assert last["epoch"] == 6 and last["phase"] == "annealing"
 
 
 def test_single_subshowers(run):

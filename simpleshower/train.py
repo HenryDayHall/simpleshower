@@ -16,8 +16,18 @@ default <showers folder>/simpleshower/<run_name>, or
     config.yaml              the config as trained, with model: pdgs filled in
     checkpoint_best.pt       the model after the epoch with the lowest validation loss
     checkpoint_last.pt       the model after the last epoch
+    checkpoints/             the model before training (epoch_0000.pt) and after
+                             epochs 2, 4, 8, 10, every 10 to 100, then every 100
     validation_examples.npz  the held-out subshowers (see generate.py --examples)
     log.csv                  losses and accuracies after each epoch
+
+The learning rate warms up over training: warmup_steps, then stays at
+training: learning_rate until none of the four losses (multiplicity,
+detector, PDG, energy; held out, or in training if nothing is held out) has
+reached a new lowest for training: plateau_epochs epochs. Then it anneals,
+along a cosine, to a tenth of that over training: cosine_epochs epochs.
+With training: epochs: -1, training stops when the annealing is done;
+otherwise it runs that many epochs, annealed or not.
 """
 
 import argparse
@@ -46,7 +56,12 @@ DEFAULTS = {
     # reach detectors all over the array, not just near their showers' cores
     "shift": True,
     "max_shift": None,  # m; None for half the width of the array
-    "epochs": 20,
+    # epochs to train for; -1 to stop when the learning rate has annealed
+    "epochs": -1,
+    # the learning rate anneals once no loss has reached a new lowest for
+    # this many epochs, along a cosine over cosine_epochs epochs
+    "plateau_epochs": 3,
+    "cosine_epochs": 20,
     "steps_per_epoch": None,  # default: one pass over the subshowers with deposits
     # subshowers per step for the multiplicity loss: enough for one pass over
     # the training subshowers each epoch, but no more than this
@@ -196,12 +211,90 @@ def evaluate(model, tensors, settings):
     return result
 
 
-def learning_rate_factor(step, warmup, total):
-    """Linear warmup, then a cosine down to a tenth."""
-    if step < warmup:
-        return (step + 1) / warmup
-    progress = min(1.0, (step - warmup) / max(1, total - warmup))
-    return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress))
+def check_schedule_settings(settings):
+    """Raise DataError unless epochs, plateau_epochs and cosine_epochs make sense."""
+
+    def whole(name, low):
+        value = settings[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < low:
+            raise DataError(f"training: {name} must be a whole number, at least {low}, not {value!r}")
+
+    if settings["epochs"] != -1:
+        whole("epochs", 1)
+    whole("plateau_epochs", 1)
+    whole("cosine_epochs", 0)
+
+
+class Schedule:
+    """
+    The learning rate, as a factor of training: learning_rate, step by step:
+    a linear warmup over warmup steps, then 1 until no loss has reached a new
+    lowest for plateau_epochs epochs, then a cosine down to final over
+    cosine_steps steps, then final.
+    """
+
+    def __init__(self, warmup, plateau_epochs, cosine_steps, final=0.1):
+        self.warmup = warmup
+        self.plateau_epochs = plateau_epochs
+        self.cosine_steps = cosine_steps
+        self.final = final
+        self.lowest = {}  # the lowest each loss has been
+        self.epochs_without_fall = 0
+        self.anneal_from = None  # the step the cosine starts at
+
+    def factor(self, step):
+        if step < self.warmup:
+            return (step + 1) / self.warmup
+        if self.anneal_from is None or step < self.anneal_from:
+            return 1.0
+        if self.cosine_steps == 0:
+            return self.final
+        progress = min(1.0, (step - self.anneal_from) / self.cosine_steps)
+        return self.final + (1 - self.final) * 0.5 * (1 + math.cos(math.pi * progress))
+
+    def end_epoch(self, losses, step):
+        """
+        After an epoch ending at step (the steps taken so far), with these
+        losses: start annealing if none has reached a new lowest for
+        plateau_epochs epochs. True if it starts now.
+        """
+        fell = False
+        for name in Model.LOSSES:
+            if name in losses and losses[name] < self.lowest.get(name, math.inf):
+                self.lowest[name] = losses[name]
+                fell = True
+        self.epochs_without_fall = 0 if fell else self.epochs_without_fall + 1
+        if self.anneal_from is None and self.epochs_without_fall >= self.plateau_epochs:
+            self.anneal_from = max(step, self.warmup)
+            return True
+        return False
+
+    def annealed(self, step):
+        """True once the cosine is over."""
+        return self.anneal_from is not None and step >= self.anneal_from + self.cosine_steps
+
+    def phase(self, step):
+        if step < self.warmup:
+            return "warmup"
+        if self.anneal_from is None or step < self.anneal_from:
+            return "fixed"
+        return "annealed" if self.annealed(step) else "annealing"
+
+
+def keeps_checkpoint(epoch):
+    """
+    Whether the model is kept after this epoch (0 for before training) in
+    checkpoints/: epochs 0, 2, 4, 8 and 10, every 10 up to 100, then every 100.
+    """
+    if epoch <= 10:
+        return epoch in (0, 2, 4, 8, 10)
+    if epoch <= 100:
+        return epoch % 10 == 0
+    return epoch % 100 == 0
+
+
+def checkpoint_path(folder, epoch):
+    return os.path.join(folder, "checkpoints", f"epoch_{epoch:04d}.pt")
 
 
 def describe(losses, names=None):
@@ -215,6 +308,7 @@ def train(config, output_dir=None, log=print):
     settings = training_settings(config)
     if output_dir is not None:
         settings["output_dir"] = output_dir
+    check_schedule_settings(settings)
     folder = output_folder(config, settings)
     config["training"] = settings
     os.makedirs(folder, exist_ok=True)
@@ -284,10 +378,10 @@ def train(config, output_dir=None, log=print):
         if len(detected)
         else math.ceil(len(training) / settings["batch_size"]),
     )
-    total_steps = steps_per_epoch * settings["epochs"]
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lambda step: learning_rate_factor(step, settings["warmup_steps"], total_steps),
+    schedule = Schedule(
+        settings["warmup_steps"],
+        settings["plateau_epochs"],
+        settings["cosine_epochs"] * steps_per_epoch,
     )
     # seeing each subshower about as often for the multiplicity as for the
     # deposits; many more passes over them would overfit the multiplicity
@@ -300,11 +394,17 @@ def train(config, output_dir=None, log=print):
         if len(detected)
         else None
     )
+    until = (
+        "until the learning rate has annealed"
+        if settings["epochs"] == -1
+        else f"for {settings['epochs']} epochs"
+    )
     log(
-        f"Training: {settings['epochs']} epochs of {steps_per_epoch} steps, each with"
+        f"Training {until}, in epochs of {steps_per_epoch} steps, each with"
         f" {batch_size} subshowers for the multiplicity and"
         f" {settings['deposit_batch_size'] if len(detected) else 0} with deposits"
-        " for the rest"
+        f" for the rest. The learning rate anneals over {settings['cosine_epochs']}"
+        f" epochs once no loss has fallen for {settings['plateau_epochs']}."
     )
 
     # ---------------------------------------------------------- epochs
@@ -312,9 +412,17 @@ def train(config, output_dir=None, log=print):
     log_columns = None
     best = math.inf
     started = time.monotonic()
-    for epoch in range(1, settings["epochs"] + 1):
+    initial = evaluate(model, validation_tensors, settings) if len(validation) else {}
+    model.write(checkpoint_path(folder, 0), epoch=0, validation=initial)
+    step = 0
+    epoch = 0
+    while True:
+        epoch += 1
         sums = defaultdict(float)
         for _ in range(steps_per_epoch):
+            learning_rate = settings["learning_rate"] * schedule.factor(step)
+            for group in optimizer.param_groups:
+                group["lr"] = learning_rate
             indices = next(subshower_batches)
             deposits = None
             if deposit_batches is not None:
@@ -331,17 +439,25 @@ def train(config, output_dir=None, log=print):
             if settings["gradient_clip"]:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), settings["gradient_clip"])
             optimizer.step()
-            scheduler.step()
+            step += 1
             for name, value in losses.items():
                 sums[name] += value.item()
+        phase = schedule.phase(step - 1)  # of the epoch's last step
         train_losses = {name: value / steps_per_epoch for name, value in sums.items()}
         validation_losses = (
             evaluate(model, validation_tensors, settings) if len(validation) else {}
         )
+        if schedule.end_epoch(validation_losses or train_losses, step):
+            log(
+                f"No loss has reached a new lowest for {settings['plateau_epochs']}"
+                f" epochs: annealing the learning rate over the next"
+                f" {settings['cosine_epochs']}"
+            )
         row = {
             "epoch": epoch,
-            "step": epoch * steps_per_epoch,
-            "learning_rate": scheduler.get_last_lr()[0],
+            "step": step,
+            "learning_rate": learning_rate,
+            "phase": phase,
             "seconds": round(time.monotonic() - started, 1),
             **{f"train_{name}": value for name, value in train_losses.items()},
             **{f"validation_{name}": value for name, value in validation_losses.items()},
@@ -362,14 +478,26 @@ def train(config, output_dir=None, log=print):
             ]
             line += f"  |  validation: {describe(validation_losses)}"
             line += f"  |  accuracy: {', '.join(accuracies)}"
-        log(line + f"  ({row['seconds']:.0f} s)")
+        log(line + f"  |  lr {learning_rate:.3g} ({phase})  ({row['seconds']:.0f} s)")
 
         score = validation_losses.get("total", train_losses["total"])
-        details = {"epoch": epoch, "validation": validation_losses}
+        details = {
+            "epoch": epoch,
+            "validation": validation_losses,
+            "learning_rate": learning_rate,
+            "phase": phase,
+        }
         if score < best:
             best = score
             model.write(os.path.join(folder, "checkpoint_best.pt"), **details)
         model.write(os.path.join(folder, "checkpoint_last.pt"), **details)
+        if keeps_checkpoint(epoch):
+            model.write(checkpoint_path(folder, epoch), **details)
+        if epoch == settings["epochs"]:
+            break
+        if settings["epochs"] == -1 and schedule.annealed(step):
+            log(f"The learning rate has annealed, after {epoch} epochs")
+            break
     log(f"Done in {time.monotonic() - started:.0f} s; best validation loss {best:.3f}")
     log(f"Checkpoints in {folder}")
     return folder
@@ -379,7 +507,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("config_file", help="yaml config, e.g. configs/default.yaml")
     parser.add_argument("--output-dir", help="instead of the config's training: output_dir")
-    parser.add_argument("--epochs", type=int, help="instead of the config's")
+    parser.add_argument(
+        "--epochs", type=int, help="instead of the config's; -1 to stop once annealed"
+    )
     parser.add_argument("--device", help="cpu, cuda, ... instead of the config's")
     parser.add_argument(
         "--max-subshowers-per-set",

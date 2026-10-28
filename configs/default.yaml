@@ -110,7 +110,14 @@ training:
   # the furthest a subshower is moved, in m; null for half the width of the
   # array, 36.6 km for the Pierre Auger surface detector
   max_shift: null
-  epochs: 20
+  # epochs to train for; -1 trains until the learning rate has annealed
+  epochs: -1
+  # The learning rate stays at learning_rate (after warmup_steps) until none
+  # of the four losses (multiplicity, detector, PDG, energy; held out) has
+  # reached a new lowest for plateau_epochs epochs, then anneals along a
+  # cosine to a tenth of it over cosine_epochs epochs.
+  plateau_epochs: 3
+  cosine_epochs: 20
   # null for one pass over the training subshowers that have deposits
   steps_per_epoch: null
   # subshowers per step for the multiplicity loss: enough for one pass

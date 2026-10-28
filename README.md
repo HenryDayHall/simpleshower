@@ -80,26 +80,31 @@ python -m simpleshower.train configs/example.yaml
 subshowers' `test/fake_data.py`, and splits them with energy cuts of 100 and
 500 GeV, into `example_data/` (about 20 s). Training samples them with a
 detector array of 400 random triangles, shifting each subshower by up to
-4.1 km across it (about a minute, then cached), and trains for 30 epochs
+4.1 km across it (about a minute, then cached), and trains until the
+learning rate has annealed (see [How long it trains](#how-long-it-trains)):
+the losses stall after 19 epochs, and annealing over 10 more takes it to 29
 (about 2.5 minutes on two CPU cores). Of the 5106 subshowers, 2205 have
 deposits (3018 without the shifts, as the array is centred where the
 showers land); 10% are held out.
 
-At the best epoch, the held-out losses are
+At the best epoch, 16, the held-out losses are
 
 | | loss | accuracy |
 | --- | --- | --- |
-| multiplicity | 1.33 | 77% right about whether there are any deposits |
-| detector | 2.15 | 33% of deposits in the highest-attention detector |
+| multiplicity | 1.29 | 77% right about whether there are any deposits |
+| detector | 2.29 | 31% of deposits in the highest-attention detector |
 | PDG | 1.61 | 22% |
-| log energy | 0.06 | |
+| log energy | 0.04 | |
 
+Annealing brings the detector loss down to 2.11 (35%) by the last epoch,
+but the multiplicity loss rises to 1.42, so the best total stays at epoch 16.
 For comparison, the detector nearest to where the start particle's track
 lands is right for 30% of deposits, and a Gaussian about that point, its
 width fitted to the training deposits (234 m), has a detector loss of 2.02,
-lower than the model's. Without the shifts the model beats the Gaussian
-(1.96 against 2.16), with the deposits crowded onto the detectors around the
-showers' cores (see [Limitations](#limitations)). The fake cascades pick each
+lower than the model's. Without the shifts (and with the learning rate
+annealed over a fixed 30 epochs), the model beat the Gaussian (1.96 against
+2.16), with the deposits crowded onto the detectors around the showers'
+cores (see [Limitations](#limitations)). The fake cascades pick each
 particle's PDG at random from five, so the PDG loss can't go below
 ln 5 = 1.61 here.
 
@@ -129,7 +134,7 @@ so nothing else changes. A `showers` section with one `folder`, as in
 subshowers' configs, still works.
 
 ```bash
-python -m simpleshower.train configs/default.yaml [--epochs N] [--device cuda]
+python -m simpleshower.train configs/default.yaml [--epochs N|-1] [--device cuda]
                                                   [--max-subshowers-per-set N] [--output-dir DIR]
 ```
 
@@ -144,11 +149,35 @@ go to `training: output_dir`, by default
 | `config.yaml` | The config as trained, with `model: pdgs` filled in from the data |
 | `checkpoint_best.pt` | The model after the epoch with the lowest held-out loss |
 | `checkpoint_last.pt` | The model after the last epoch |
+| `checkpoints/epoch_NNNN.pt` | The model before training (`epoch_0000.pt`) and after epochs 2, 4, 8 and 10, every 10 up to 100, then every 100; kept, not overwritten |
 | `validation_examples.npz` | The held-out subshowers |
-| `log.csv` | Losses and accuracies after each epoch |
+| `log.csv` | Losses, accuracies, the learning rate and its phase after each epoch |
 
 A checkpoint holds the weights, the config and the detector positions, so a
-model can be used without the array or the data.
+model can be used without the array or the data, and the epoch, the
+held-out losses, and the learning rate it was trained at.
+
+### How long it trains
+
+The learning rate rises over `warmup_steps`, then stays at `learning_rate`
+until the training stalls: until none of the four losses (multiplicity,
+detector, PDG and energy, on the held-out subshowers) has reached a new
+lowest for `plateau_epochs` epochs in a row. Then it anneals, along a cosine
+down to a tenth, over `cosine_epochs` epochs.
+
+```yaml
+training:
+  epochs: -1          # train until the learning rate has annealed; or a number
+  plateau_epochs: 3
+  cosine_epochs: 20
+```
+
+With `epochs: -1`, training stops when the annealing is done, however many
+epochs that takes. With a number, it runs that many epochs: if the losses
+haven't stalled by then, the learning rate never anneals, and if they stall
+early it carries on at the annealed rate. The log says when annealing
+starts, and `log.csv` has the learning rate and its phase (`warmup`, `fixed`,
+`annealing` or `annealed`) for each epoch.
 
 Each step takes `deposit_batch_size` subshowers that have deposits, for the
 deposit losses, and enough subshowers of all kinds for the multiplicity loss
@@ -292,13 +321,13 @@ checkpoint. For the fake showers:
 
 | | dataset | model |
 | --- | --- | --- |
-| fraction with deposits | 0.46 | 0.44 |
-| deposits per subshower | 1.45 | 1.40 |
-| detectors hit per subshower | 0.87 | 1.02 |
-| energy deposited per subshower | 1.30 GeV | 1.30 GeV |
-| median energy deposited, of those with deposits | 1.94 GeV | 1.98 GeV |
+| fraction with deposits | 0.46 | 0.45 |
+| deposits per subshower | 1.45 | 1.55 |
+| detectors hit per subshower | 0.87 | 1.17 |
+| energy deposited per subshower | 1.30 GeV | 1.48 GeV |
+| median energy deposited, of those with deposits | 1.94 GeV | 2.50 GeV |
 
-33% of the model's deposits are in a detector the dataset's subshower hit.
+27% of the model's deposits are in a detector the dataset's subshower hit.
 
 ## Limitations
 
@@ -306,15 +335,15 @@ checkpoint. For the fake showers:
   describes, so a subshower's deposits are drawn independently, given the
   incident particle, the multiplicity and their ranks. The model can't say
   "all in this detector, or all in that one", which is why it spreads deposits
-  over more detectors than the dataset (1.02 against 0.87 above). Self-attention
+  over more detectors than the dataset (1.17 against 0.87 above). Self-attention
   between the deposit tokens in each round would be the natural next step.
 - Each subshower is used once a run, at one place. Shifted across the array,
   the same subshowers are shared among more of its detectors: in the example,
   the training deposits fall on 387 of the 400 detectors, where without the
   shifts they fell on 239, and 43% of them on the busiest 20. So each
   detector has fewer examples to learn from, and training longer overfits:
-  over 90 epochs, the training detector loss falls to 1.60 while the held-out
-  one rises to 2.31. Shifting each subshower to several places would give
+  annealing over 90 epochs, the training detector loss falls to 1.60 while
+  the held-out one rises to 2.31. Shifting each subshower to several places would give
   every detector more examples.
 - Without `deposit_rank` in `deposit_encoder: inputs`, every deposit token of
   a subshower is the same, and its deposits are drawn from one distribution.
@@ -345,6 +374,7 @@ configs/
 test/
 ├── test_end_to_end.py  Fake data, training, reloading and generating, in about 10 s
 ├── test_data.py        Examples of shifted subshowers, their settings and cache (no torch)
+├── test_schedule.py    The learning rate schedule, and which checkpoints are kept
 └── test_bundle.py      Export, ONNX Runtime against PyTorch, plugin against sampling.py
 ```
 

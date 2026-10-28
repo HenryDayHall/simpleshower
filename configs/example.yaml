@@ -107,7 +107,9 @@ training:
   max_subshowers_per_set: null
   shift: true  # across the ground, see default.yaml
   max_shift: null  # m; half the width of the array, 4.1 km here
-  epochs: 30
+  epochs: -1  # until annealed; see default.yaml
+  plateau_epochs: 3
+  cosine_epochs: 10
   steps_per_epoch: null
   batch_size: 256  # at most; see default.yaml
   deposit_batch_size: 32
