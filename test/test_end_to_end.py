@@ -1,7 +1,8 @@
 """
 Make two small fake showers, train a small model on them for a few steps,
 and predict subshowers with it, checking each stage gives what the next needs;
-then train one on the same showers in two showers folders.
+then train one on the same showers in two showers folders. The runs share
+one examples cache.
 
     pytest test
 
@@ -176,6 +177,42 @@ def test_unseeded_array_is_refused(config, tmp_path):
         train.train(unseeded, output_dir=str(tmp_path), log=lambda text: None)
 
 
+def test_runs_share_the_examples_cache(config, run, tmp_path):
+    """
+    A run with another name, model and training settings samples nothing: it
+    reads every set's examples from the cache the first run filled.
+    """
+    other = copy.deepcopy(config)
+    other["training"].update(output_dir=str(tmp_path / "other"), epochs=1, learning_rate=3.0e-4)
+    other["model"]["deposit_token"]["rounds"] = 1
+    lines = []
+    train.train(other, log=lines.append)
+    cache = train.examples_folder(config, train.training_settings(config))
+    assert cache == os.path.join(os.path.abspath(config["storage_path"]), "simpleshower", "examples")
+    assert f"Examples cache: {cache}" in lines
+    sets = [line for line in lines if line.startswith("  ") and "subshowers," in line]
+    assert len(sets) == 4 and all(line.endswith("(cached)") for line in sets)
+    # beside the runs, not in them
+    assert not os.path.exists(os.path.join(run, "examples"))
+    assert not os.path.exists(os.path.join(tmp_path, "other", "examples"))
+
+
+def test_run_in_the_examples_cache_is_refused(config):
+    clash = copy.deepcopy(config)
+    clash["training"]["output_dir"] = train.examples_folder(clash, train.training_settings(clash))
+    with pytest.raises(DataError, match="is the examples cache"):
+        train.train(clash, log=lambda text: None)
+
+
+def test_examples_dir_on_the_command_line(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(train, "train", lambda config, output_dir=None: seen.update(config["training"]))
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"training": {"epochs": 3}}))
+    train.main([str(path), "--examples-dir", "elsewhere"])
+    assert seen == {"epochs": 3, "examples_dir": "elsewhere"}
+
+
 @pytest.fixture(scope="module")
 def two_folder_run(config, tmp_path_factory):
     """(config, output folder) of a run on the showers in PDG22 and in PDG11."""
@@ -192,10 +229,15 @@ def two_folder_run(config, tmp_path_factory):
 def test_several_shower_folders(config, run, two_folder_run):
     both, folder = two_folder_run
     assert os.path.isfile(os.path.join(folder, "checkpoint_last.pt"))
-    # both runs' subshowers, from their caches
+    # both runs' subshowers, from the cache they share: the two-folder run
+    # read PDG22's sets from the one-folder run's files, and added PDG11's
     quiet = {"log": lambda text: None}
-    examples = examples_from_config(both, os.path.join(folder, "examples"), **quiet)
-    alone = examples_from_config(config, os.path.join(run, "examples"), **quiet)
+    cache = train.examples_folder(config, train.training_settings(config))
+    names = os.listdir(cache)
+    assert sum(name.startswith("PDG22_") for name in names) == 4
+    assert sum(name.startswith("PDG11_") for name in names) == 4
+    examples = examples_from_config(both, cache, **quiet)
+    alone = examples_from_config(config, cache, **quiet)
     in_pdg22 = np.char.startswith(examples.source, "PDG22/")
     in_pdg11 = np.char.startswith(examples.source, "PDG11/")
     assert np.all(in_pdg22 | in_pdg11)

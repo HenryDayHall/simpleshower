@@ -99,6 +99,11 @@ training:
   # default: <storage_path>/<showers folder>/simpleshower/<run_name>, or
   # <storage_path>/simpleshower/<run_name> with more than one showers folder
   output_dir: null
+  # Each subshower set's training examples are cached here, for every run to
+  # share; null for <storage_path>/simpleshower/examples. A run reads the
+  # files made with its sets, array and sampling options (max_subshowers_per_set,
+  # shift, max_shift, seed), and adds those that aren't there.
+  examples_dir: null
   validation_fraction: 0.1
   # use this many subshowers at random from each set; null for all
   max_subshowers_per_set: null

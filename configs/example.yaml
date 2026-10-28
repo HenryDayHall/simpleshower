@@ -103,6 +103,7 @@ model:
 
 training:
   output_dir: null
+  examples_dir: null  # example_data/simpleshower/examples; see default.yaml
   validation_fraction: 0.1
   max_subshowers_per_set: null
   shift: true  # across the ground, see default.yaml

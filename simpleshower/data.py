@@ -14,15 +14,20 @@ its incident particle starts where the shifted one does, its deposits are
 those the shifted leaves make, and its shift says how far it was moved.
 
 Working out which leaves hit which detectors takes a pass over every
-subshower, so each subshower set's examples are cached, and used again while
-the set, the detector array and the sampling options stay the same.
+subshower, so each subshower set's examples are cached, in a folder that
+runs share, and used again by any run with the same set, detector array and
+sampling options.
 """
 
+import contextlib
+import hashlib
 import json
 import math
 import os
 import time
+import uuid
 import warnings
+import zipfile
 import zlib
 
 import numpy as np
@@ -239,10 +244,16 @@ class Examples:
         for name, column in self.incident.items():
             arrays[f"incident_{name}"] = column
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        temporary = path + ".tmp"
-        with open(temporary, "wb") as f:
-            np.savez_compressed(f, **arrays)
-        os.replace(temporary, path)
+        # a temporary file of its own, so that runs saving the same file at
+        # once, as runs sharing a cache can, don't write into each other's
+        temporary = f"{path}.{uuid.uuid4().hex[:12]}.tmp"
+        try:
+            with open(temporary, "xb") as f:
+                np.savez_compressed(f, **arrays)
+            os.replace(temporary, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temporary)  # only there if saving failed
 
     @classmethod
     def load(cls, path):
@@ -425,6 +436,62 @@ def shift_distance(array, shift=True, max_shift=None):
     return distance
 
 
+# ------------------------------------------------------------ the cache
+
+# what reading a file that isn't examples, or is broken, can raise
+UNREADABLE = (OSError, ValueError, KeyError, TypeError, EOFError, zipfile.BadZipFile)
+
+
+def settings_digest(settings):
+    """A short hash of the settings a set's examples are made with."""
+    text = json.dumps(settings, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()[:8]
+
+
+def cache_name(folder, subshower_set, settings):
+    """
+    The file a set's examples are cached in: the set, with its showers folder
+    however many a run trains on, then the hash of the settings, so examples
+    made with other settings are kept beside these, as
+    PDG22_e1e5_0_e100.3f9a1c2b.npz.
+    """
+    name = f"{folder}/{subshower_set.shower.subfolder}_e{subshower_set.energy_cut}"
+    return f"{name.replace(os.sep, '_')}.{settings_digest(settings)}.npz"
+
+
+def made_with(path, settings):
+    """True if path holds examples made with these settings."""
+    try:
+        metadata = Examples.read_metadata(path)
+    except UNREADABLE:
+        return False
+    return isinstance(metadata, dict) and metadata.get("settings") == json.loads(
+        json.dumps(settings)
+    )
+
+
+def find_cached(cache_folder, name, settings):
+    """
+    The file in cache_folder of examples made with these settings, or None:
+    the one named for them, or else any other there, whatever its name, so
+    that files put there by hand, such as those of a run that kept its own
+    cache, are found too.
+    """
+    expected = os.path.join(cache_folder, name)
+    if made_with(expected, settings):
+        return expected
+    try:
+        with os.scandir(cache_folder) as entries:
+            others = sorted(
+                entry.path
+                for entry in entries
+                if entry.name.endswith(".npz") and entry.path != expected and entry.is_file()
+            )
+    except OSError:  # no cache yet
+        return None
+    return next((path for path in others if made_with(path, settings)), None)
+
+
 def examples_from_config(
     config, cache_folder, max_per_set=None, seed=0, shift=True, max_shift=None, log=print
 ):
@@ -442,8 +509,12 @@ def examples_from_config(
     None), come from seed and the set, so they differ from set to set and
     are the same every time.
 
-    Each set's examples are cached in cache_folder, and read from there
-    while the set, the array and these options stay the same.
+    Each set's examples are cached in cache_folder, which runs can share, and
+    read from there by any run with the same set, array and options. Files
+    are named by cache_name, so examples made with other settings are kept
+    beside them, and any file there made with these settings is used,
+    whatever its name. However they were cached, a set's subshowers are
+    named as this config names them.
     """
     from subshowers import datasets, detector, generation
     from subshowers.sampling import SubshowerSampler
@@ -510,20 +581,16 @@ def examples_from_config(
         set_rng = np.random.default_rng(
             None if seed is None else [seed, zlib.crc32(set_key.encode())]
         )
-        name = named(
-            folder, f"{subshower_set.shower.subfolder}_e{subshower_set.energy_cut}"
-        ).replace(os.sep, "_")
-        path = os.path.join(cache_folder, f"{name}.npz")
+        name = cache_name(folder, subshower_set, settings)
         examples = None
-        if os.path.isfile(path):
+        cached = find_cached(cache_folder, name, settings)
+        if cached is not None:
             try:
-                if Examples.read_metadata(path).get("settings") == json.loads(
-                    json.dumps(settings)
-                ):
-                    examples = Examples.load(path)
-                    how = "cached"
-            except (OSError, ValueError, KeyError):
+                examples = Examples.load(cached)
+            except UNREADABLE:
                 examples = None
+            found_as = os.path.basename(cached)
+            how = "cached" if found_as == name else f"cached in {found_as}"
         if examples is None:
             started = time.monotonic()
             source = check.source()
@@ -547,8 +614,11 @@ def examples_from_config(
                 examples = examples_from_samples(samples, array, source_name=source_name)
             source.release()
             examples.metadata = {"settings": settings}
-            examples.save(path)
+            examples.save(os.path.join(cache_folder, name))
             how = f"sampled in {time.monotonic() - started:.0f} s"
+        # whichever run cached them: with one showers folder or several, the
+        # sources are named differently (deduplicated() goes by them)
+        examples.source = np.full(len(examples), source_name)
         log(
             f"  {named(folder, check.label)}: {len(examples)} subshowers,"
             f" {examples.detected.sum()} with deposits ({how})"

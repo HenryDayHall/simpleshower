@@ -12,7 +12,6 @@ the same subfolders. Everything is written to training: output_dir, by
 default <showers folder>/simpleshower/<run_name>, or
 <storage_path>/simpleshower/<run_name> with more than one showers folder:
 
-    examples/                the training examples of each subshower set, cached
     config.yaml              the config as trained, with model: pdgs filled in
     checkpoint_best.pt       the model after the epoch with the lowest validation loss
     checkpoint_last.pt       the model after the last epoch
@@ -20,6 +19,11 @@ default <showers folder>/simpleshower/<run_name>, or
                              epochs 2, 4, 8, 10, every 10 to 100, then every 100
     validation_examples.npz  the held-out subshowers (see generate.py --examples)
     log.csv                  losses and accuracies after each epoch
+
+Each subshower set's training examples are cached apart from the runs, in
+training: examples_dir, by default <storage_path>/simpleshower/examples,
+for every run to share: a run reads the files made with its sets, array and
+sampling options, and adds those that aren't there (see data.py).
 
 The learning rate warms up over training: warmup_steps, then stays at
 training: learning_rate until none of the four losses (multiplicity,
@@ -49,6 +53,8 @@ from simpleshower.model import Model
 # training settings that the config's training section can change
 DEFAULTS = {
     "output_dir": None,
+    # the examples cache, shared by runs; None for <storage_path>/simpleshower/examples
+    "examples_dir": None,
     "validation_fraction": 0.1,
     "max_subshowers_per_set": None,  # subshowers taken at random from each set
     # move each subshower across the ground, by a random shift in x and y,
@@ -96,6 +102,17 @@ def output_folder(config, settings):
     else:  # no one showers folder holds them all
         base = os.path.abspath(config["storage_path"])
     return os.path.join(base, "simpleshower", str(run_name))
+
+
+def examples_folder(config, settings):
+    """
+    Where each subshower set's training examples are cached: training:
+    examples_dir, or by default <storage_path>/simpleshower/examples, shared
+    by every run on that storage_path, with one showers folder or several.
+    """
+    if settings["examples_dir"]:
+        return os.path.abspath(settings["examples_dir"])
+    return os.path.join(os.path.abspath(config["storage_path"]), "simpleshower", "examples")
 
 
 def pick_device(name):
@@ -310,6 +327,12 @@ def train(config, output_dir=None, log=print):
         settings["output_dir"] = output_dir
     check_schedule_settings(settings)
     folder = output_folder(config, settings)
+    cache = examples_folder(config, settings)
+    if cache == folder:
+        raise DataError(
+            f"the run's output folder, {folder}, is the examples cache; give the"
+            " run another name, or training: examples_dir another folder"
+        )
     config["training"] = settings
     os.makedirs(folder, exist_ok=True)
     seed = settings["seed"]
@@ -317,12 +340,13 @@ def train(config, output_dir=None, log=print):
     rng = np.random.default_rng(seed)
     device = pick_device(settings["device"])
     log(f"Output: {folder}")
+    log(f"Examples cache: {cache}")
     log(f"Device: {device}")
 
     # ------------------------------------------------------------ data
     examples = examples_from_config(
         config,
-        os.path.join(folder, "examples"),
+        cache,
         max_per_set=settings["max_subshowers_per_set"],
         seed=seed,
         shift=settings["shift"],
@@ -508,6 +532,10 @@ def parse_args(argv=None):
     parser.add_argument("config_file", help="yaml config, e.g. configs/default.yaml")
     parser.add_argument("--output-dir", help="instead of the config's training: output_dir")
     parser.add_argument(
+        "--examples-dir",
+        help="the examples cache, instead of the config's training: examples_dir",
+    )
+    parser.add_argument(
         "--epochs", type=int, help="instead of the config's; -1 to stop once annealed"
     )
     parser.add_argument("--device", help="cpu, cuda, ... instead of the config's")
@@ -524,7 +552,7 @@ def main(argv=None):
     with open(args.config_file, "r") as f:
         config = yaml.safe_load(f)
     training = config.setdefault("training", None) or {}
-    for key in ["epochs", "device", "max_subshowers_per_set"]:
+    for key in ["epochs", "device", "max_subshowers_per_set", "examples_dir"]:
         if getattr(args, key) is not None:
             training[key] = getattr(args, key)
     config["training"] = training

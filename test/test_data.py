@@ -1,7 +1,7 @@
 """
 Training examples of subshowers the sampler shifts across the ground: their
-deposits, the shifts they record, the settings for them, and their cache.
-These don't need torch.
+deposits, the shifts they record, the settings for them, and the cache runs
+share. These don't need torch.
 
     pytest test/test_data.py
 
@@ -12,6 +12,7 @@ scripts/make_fake_data.py uses its test/fake_data.py.
 import copy
 import dataclasses
 import os
+import re
 import sys
 
 import numpy as np
@@ -168,6 +169,92 @@ def test_cache_follows_the_shift_settings(config, tmp_path):
     assert how(max_shift=500.0) == {"cached"}
     assert how(shift=False) == {"sampled"}
     assert how(shift=False) == {"cached"}
+    # each settings' files are kept beside the others', so none are made again
+    assert how() == {"cached"}
+    assert how(max_shift=500.0) == {"cached"}
+    names = sorted(path.name for path in cache.iterdir())
+    assert len(names) == 12  # 4 sets, with 3 settings each
+    assert all(
+        re.fullmatch(r"PDG22_e[58]e3_[01]_e(100|500)\.[0-9a-f]{8}\.npz", name) for name in names
+    )
+    assert len({name.split(".")[0] for name in names}) == 4
+
+
+def test_cache_finds_files_by_their_settings(config, tmp_path):
+    """
+    A file in the cache made with a run's settings is used whatever it's
+    called, as those of runs that kept their own caches are; files that
+    aren't examples are passed over.
+    """
+    cache = tmp_path / "examples"
+    examples, _ = made(config, cache)
+    for path in list(cache.iterdir()):
+        # as a run on one showers folder named it in its own examples/
+        path.rename(cache / f"{path.name.split('.')[0].removeprefix('PDG22_')}.npz")
+    (cache / "broken.npz").write_bytes(b"not examples")
+    (cache / "empty.npz").write_bytes(b"")
+    again, lines = made(config, cache)
+    found = [line for line in lines if "subshowers," in line]
+    assert len(found) == 4 and all("(cached in e" in line for line in found)
+    np.testing.assert_array_equal(again.source, examples.source)
+    np.testing.assert_array_equal(again.shift, examples.shift)
+    np.testing.assert_array_equal(again.deposit_detector, examples.deposit_detector)
+    # but not for other settings
+    _, lines = made(config, cache, seed=1)
+    assert all("(sampled" in line for line in lines if "subshowers," in line)
+
+
+def test_cache_is_shared_by_runs_on_one_folder_or_several(config, tmp_path):
+    """
+    A run on several showers folders reads the files of a run on one of them,
+    and the other way round, naming the subshowers as it would have.
+    """
+    cache = tmp_path / "examples"
+    alone, _ = made(config, cache)
+    several = copy.deepcopy(config)
+    several["showers"]["folders"] = ["PDG22", "PDG11"]  # PDG11's aren't made: left out
+    together, lines = made(several, cache)
+    found = [line for line in lines if "subshowers," in line]
+    assert len(found) == 4 and all(line.endswith("(cached)") for line in found)
+    # named with their folder, so they aren't taken for repeats of another's
+    np.testing.assert_array_equal(together.source, np.char.add("PDG22/", alone.source))
+    np.testing.assert_array_equal(together.start_index, alone.start_index)
+    np.testing.assert_array_equal(together.shift, alone.shift)
+    again, _ = made(config, cache)
+    np.testing.assert_array_equal(again.source, alone.source)
+
+
+def test_runs_saving_one_file_at_once(config, tmp_path, monkeypatch):
+    """
+    Runs sharing a cache can save a set's file at the same time: each writes
+    a temporary file of its own, so neither spoils the other's, and a save
+    that fails leaves the file as it was.
+    """
+    examples, _ = made(config, tmp_path / "examples")
+    first, second = examples.select(np.arange(5)), examples.select(np.arange(5, 12))
+    path = str(tmp_path / "shared" / "set.npz")
+    save = np.savez_compressed
+
+    def meanwhile(file, **arrays):
+        save(file, **arrays)
+        if not meanwhile.done:  # another run saves the file while this one is
+            meanwhile.done = True
+            second.save(path)
+
+    meanwhile.done = False
+    monkeypatch.setattr(np, "savez_compressed", meanwhile)
+    first.save(path)
+    assert len(Examples.load(path)) == len(first)  # the last to finish is kept
+
+    def full(file, **arrays):
+        raise OSError("no space left")
+
+    monkeypatch.setattr(np, "savez_compressed", full)
+    with pytest.raises(OSError, match="no space left"):
+        second.save(path)
+    monkeypatch.undo()
+    assert len(Examples.load(path)) == len(first)
+    assert os.listdir(tmp_path / "shared") == ["set.npz"]  # no temporary files left
 
 
 def test_examples_files(config, tmp_path):

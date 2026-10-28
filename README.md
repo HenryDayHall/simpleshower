@@ -80,7 +80,8 @@ python -m simpleshower.train configs/example.yaml
 subshowers' `test/fake_data.py`, and splits them with energy cuts of 100 and
 500 GeV, into `example_data/` (about 20 s). Training samples them with a
 detector array of 400 random triangles, shifting each subshower by up to
-4.1 km across it (about a minute, then cached), and trains until the
+4.1 km across it (about a minute, then [cached](#the-examples-cache) for
+later runs), and trains until the
 learning rate has annealed (see [How long it trains](#how-long-it-trains)):
 the losses stall after 19 epochs, and annealing over 10 more takes it to 29
 (about 2.5 minutes on two CPU cores). Of the 5106 subshowers, 2205 have
@@ -136,6 +137,7 @@ subshowers' configs, still works.
 ```bash
 python -m simpleshower.train configs/default.yaml [--epochs N|-1] [--device cuda]
                                                   [--max-subshowers-per-set N] [--output-dir DIR]
+                                                  [--examples-dir DIR]
 ```
 
 Sets the config asks for that aren't made are listed and left out. Outputs
@@ -145,7 +147,6 @@ go to `training: output_dir`, by default
 
 | File | What it is |
 | --- | --- |
-| `examples/` | Each subshower set's training examples, cached; made again if the set, the array or the sampling options (`max_subshowers_per_set`, `shift`, `max_shift`, `seed`) change |
 | `config.yaml` | The config as trained, with `model: pdgs` filled in from the data |
 | `checkpoint_best.pt` | The model after the epoch with the lowest held-out loss |
 | `checkpoint_last.pt` | The model after the last epoch |
@@ -156,6 +157,42 @@ go to `training: output_dir`, by default
 A checkpoint holds the weights, the config and the detector positions, so a
 model can be used without the array or the data, and the epoch, the
 held-out losses, and the learning rate it was trained at.
+
+### The examples cache
+
+Making a subshower set's training examples takes a pass over every one of
+its subshowers, which can take longer than the training, so they're cached
+apart from the runs, for every run to share: in `training: examples_dir`
+(or `--examples-dir`), by default `<storage_path>/simpleshower/examples/`,
+whether a run has one showers folder or several.
+
+A set's examples depend on the set and its shower's history, the
+`detectors` section, and `max_subshowers_per_set`, `shift`, `max_shift` and
+`seed`, but on nothing in `model` or the rest of `training`. Each file holds
+those settings, and is named by the set and a hash of them, as
+`PDG22_e1e5_0_e100.3f9a1c2b.npz`. A run reads the files made with its
+settings and samples only the sets it finds none for, so files made with
+other settings, such as a quick run's with `--max-subshowers-per-set`, are
+kept beside them rather than made again each time.
+
+Any file in the cache made with a run's settings is used, whatever it's
+called, so runs from before the cache was shared can hand on the examples
+they kept in their own `examples/` folders: link or copy them in.
+
+```bash
+cd <storage_path>/simpleshower
+mkdir -p examples
+cp -al default_2/examples/*.npz examples/   # hard links; cp -a to copy
+```
+
+Runs can make the same set at once: each saves to a temporary file of its
+own and then moves it into place, so they don't spoil each other's files,
+though each of them does the sampling.
+
+The settings say nothing about the code, so after changing how examples are
+made (subshowers' sampler, or `deposits_of` here), empty the cache. They hold
+each set's path, and its history's size and modification time, so copies of
+the files only match where the data has the same path and times.
 
 ### How long it trains
 
@@ -209,8 +246,8 @@ far it was moved: the incident x and y less the shift are where the history
 has its start particle. `generate.py --examples` prints the shift with the
 dataset's subshower. Each set's shifts are drawn from `training: seed` and
 the set, so they differ from set to set and the cached examples are the same
-every time; changing `shift`, `max_shift` or `seed` makes them again. Each
-subshower is used once a run, at one place.
+every time; changing `shift`, `max_shift` or `seed` makes new ones, kept
+beside them in the cache. Each subshower is used once a run, at one place.
 
 ## Predicting single subshowers
 
